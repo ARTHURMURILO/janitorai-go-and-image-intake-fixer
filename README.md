@@ -104,9 +104,25 @@ sheet. Then:
 - the bridge relays them there, so you still get image intake, self hosting
   and the 4 image cap for **any** provider.
 
-Forwarding only happens with your owner key, only over https, and only to
-public hosts; anyone else's tagged request is ignored and follows normal
-routing. Turn the toggle off and everything goes direct again.
+Forwarding only works with a key from the **owner set**, only over https,
+and only to public hosts. A refused forward answers with a clear 403 that
+names the fix (instead of silently falling through to some default upstream),
+and the toggle off means everything goes direct again.
+
+Because JanitorAI has one key slot, forward mode puts your *target API's* key
+there (Xiaomi's key, say). Tell the bridge it is yours, once:
+
+```bash
+printf %s 'YOUR-XIAOMI-KEY' | sha256sum
+# then, on the server (gitignored file):
+echo 'export OWNER_KEY_SHA256="<hash-from-above>"' >> ~/Documents/start-zen-proxy.local.sh
+bash ~/Documents/start-zen-proxy.sh
+```
+
+`OWNER_KEY_SHA256` takes a comma separated list and is **unioned with the
+existing pin**, so your original key keeps working. Keys added this way are
+full owner keys: they also drive device binding, so phones using forward mode
+bind automatically too.
 
 ## How sending works
 

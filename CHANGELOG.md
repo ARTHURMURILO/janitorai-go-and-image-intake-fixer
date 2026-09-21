@@ -1,5 +1,16 @@
 # Changelog
 
+## Bridge 2.6
+- **Multiple owner keys**: `OWNER_KEY_SHA256` now accepts a comma separated
+  list and is unioned with the trust-on-first-use pin instead of replacing
+  it. Needed for forward mode, where JanitorAI's one key slot holds the
+  target API's key (Xiaomi etc.): add its hash once and forwarding, binding
+  and auto-bind all work with it.
+- **Honest forward failures**: a forward request that is refused (key not in
+  the owner set, non-https target, private host) now returns 403 with the
+  exact reason and the fix, instead of silently falling through to the
+  default upstream where it surfaced as a misleading 401.
+
 ## Bridge 2.5 and userscript 1.9.1
 - **Bind without spending a message**: `/img/token` accepts the pinned owner
   key in `Authorization` and binds the caller immediately, forwarding nothing

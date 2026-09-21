@@ -179,6 +179,22 @@ check("TOK and does not pin itself",
 m._owner_hash_cache = None
 m.key_is_owner("owner-key")
 
+# --- owner set: env list union file pin (third-party keys in forward mode) --
+_real_env = m.OWNER_KEY_SHA256
+m.OWNER_KEY_SHA256 = (m._key_fingerprint("xiaomi-key-123") + ",  " +
+                      m._key_fingerprint("other-key") + ",")
+m._owner_hash_cache = None
+try:
+    check("OWNER set accepts a listed second key",
+          m.key_is_owner("xiaomi-key-123") is True)
+    check("OWNER set keeps the TOFU file pin working too",
+          m.key_is_owner("owner-key") is True)
+    check("OWNER set still rejects unknown keys",
+          m.key_is_owner("not-a-key") is False)
+finally:
+    m.OWNER_KEY_SHA256 = _real_env
+    m._owner_hash_cache = None
+
 # --- Forward mode: owner key only, public https targets only -----------------
 _fwd_seen = {}
 
@@ -193,6 +209,7 @@ class _FakeUpstream:
         yield self.content
 
 def _capturing_request(method, url, **kw):
+    _fwd_seen["calls"] = _fwd_seen.get("calls", 0) + 1
     _fwd_seen["url"] = url
     _fwd_seen["headers"] = kw.get("headers") or {}
     return _FakeUpstream()
@@ -215,19 +232,24 @@ check("FWD neutral mode adds no opencode session header",
       not any(k.lower() == "x-opencode-session" for k in _fwd_seen.get("headers", {})),
       _fwd_seen.get("headers"))
 
-client.post("/v1/chat/completions", json=_fwd_body,
-            headers={"Authorization": "Bearer attacker-key",
-                     "X-Zen-Forward-Origin": "https://api.evil.example"})
-check("FWD non-owner key is ignored (normal routing)",
-      not str(_fwd_seen.get("url", "")).startswith("https://api.evil.example"),
-      _fwd_seen.get("url"))
+_calls = _fwd_seen.get("calls", 0)
+r = client.post("/v1/chat/completions", json=_fwd_body,
+                headers={"Authorization": "Bearer attacker-key",
+                         "X-Zen-Forward-Origin": "https://api.evil.example"})
+check("FWD non-owner key refused with 403", r.status_code == 403, r.status_code)
+check("FWD refusal never contacts the upstream",
+      _fwd_seen.get("calls", 0) == _calls, _fwd_seen.get("calls"))
+check("FWD refusal tells the user how to fix it",
+      b"OWNER_KEY_SHA256" in r.get_data(), r.get_data()[:200])
 
-client.post("/v1/chat/completions", json=_fwd_body,
-            headers={"Authorization": "Bearer owner-key",
-                     "X-Zen-Forward-Origin": "http://169.254.169.254/latest"})
-check("FWD http / link-local target refused",
-      not str(_fwd_seen.get("url", "")).startswith("http://169.254.169.254"),
-      _fwd_seen.get("url"))
+_calls = _fwd_seen.get("calls", 0)
+r = client.post("/v1/chat/completions", json=_fwd_body,
+                headers={"Authorization": "Bearer owner-key",
+                         "X-Zen-Forward-Origin": "http://169.254.169.254/latest"})
+check("FWD http / link-local target refused with 403",
+      r.status_code == 403, r.status_code)
+check("FWD refused target never contacted",
+      _fwd_seen.get("calls", 0) == _calls, _fwd_seen.get("calls"))
 
 print("\nSECURITY_TESTS_" + ("OK" if not _fail else "FAILED: " + ", ".join(_fail)))
 raise SystemExit(1 if _fail else 0)

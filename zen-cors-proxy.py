@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, Response, request as flask_req
 
-VERSION = "2.5"
+VERSION = "2.6"
 PORT = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 8081))
 PROXY_UA = os.environ.get("PROXY_USER_AGENT", "janitorai-bridge/" + VERSION)
 SESSION_FILE = os.environ.get(
@@ -717,34 +717,36 @@ def bearer_token(auth_value):
 
 
 def _validated_forward_origin():
-    """Origin the userscript asks us to relay to (X-Zen-Forward-Origin).
+    """(origin, refusal_reason) for the X-Zen-Forward-Origin relay request.
 
-    Only honored for the owner's key, and only for public https targets: the
-    tunnel is on the internet, so this must never become a general relay or an
-    SSRF trampoline. Everyone else's header is ignored and normal routing
-    applies, which is exactly the pre-forward behaviour.
+    An absent header is not a forward request at all: (None, ""). A present
+    but refused header returns a reason that is handed to JanitorAI verbatim:
+    the old silent fallthrough showed users a misleading 401 from whichever
+    default upstream happened to answer instead. Only the owner key set may
+    ask for a relay, and only to public https targets: the tunnel is on the
+    internet, so this must never become a general relay or an SSRF trampoline.
     """
     raw = (flask_req.headers.get("X-Zen-Forward-Origin") or "").strip()
     if not raw:
-        return None
+        return None, ""
     if "," in raw:  # duplicated header (or a comma): refuse to guess
-        return None
-    if not key_is_owner(bearer_token(flask_req.headers.get("Authorization", ""))):
-        log.info("[forward] ignored (key is not the owner key) from %s", _client_ip())
-        return None
+        return None, "duplicated X-Zen-Forward-Origin header"
+    bearer = bearer_token(flask_req.headers.get("Authorization", ""))
+    if not (_owner_hashes() and key_is_owner(bearer)):
+        return None, ("the API key in this request is not in the owner set; "
+                      "hash it with printf %s 'YOUR-KEY' | sha256sum and add "
+                      "it to OWNER_KEY_SHA256 in start-zen-proxy.local.sh")
     try:
         parts = urllib.parse.urlsplit(raw)
     except ValueError:
-        return None
+        return None, "unparsable target URL"
     if parts.scheme != "https" or not parts.hostname:
-        log.warning("[forward] rejected (not https): %s", raw[:80])
-        return None
+        return None, "target must be a public https origin"
     if parts.username or parts.password:
-        return None
+        return None, "target must not embed credentials"
     if not _is_fetchable_public_url(raw):
-        log.warning("[forward] blocked non-public target: %s", raw[:80])
-        return None
-    return raw.rstrip("/")
+        return None, "target is not a public host (private/loopback/link-local refused)"
+    return raw.rstrip("/"), ""
 
 
 def build_upstream_headers(provider_key, neutral=False):
@@ -1020,34 +1022,43 @@ def _key_fingerprint(bearer):
     return hashlib.sha256((bearer or "").encode("utf-8")).hexdigest()
 
 
-def _owner_hash():
+def _owner_hashes():
+    """Every accepted owner-key hash: the OWNER_KEY_SHA256 list union the
+    TOFU-pinned file. Multiple keys are a first-class case: forward mode puts
+    the third-party API's key in JanitorAI, so it must be enterable as an
+    owner too, and switching providers must not invalidate the old one.
+    """
     global _owner_hash_cache
     if _owner_hash_cache is None:
         with _owner_hash_lock:
             if _owner_hash_cache is None:
+                s = set()
                 if OWNER_KEY_SHA256:
-                    _owner_hash_cache = OWNER_KEY_SHA256
-                else:
-                    try:
-                        _owner_hash_cache = _owner_hash_file().read_text().strip().lower()
-                    except OSError:
-                        _owner_hash_cache = ""
+                    s.update(p for p in
+                             (x.strip().lower() for x in OWNER_KEY_SHA256.split(",")) if p)
+                try:
+                    pinned = _owner_hash_file().read_text().strip().lower()
+                    if pinned:
+                        s.add(pinned)
+                except OSError:
+                    pass
+                _owner_hash_cache = s
     return _owner_hash_cache
 
 
 def key_is_owner(bearer):
-    """True when this key is the owner's (pinning it on the very first success)."""
+    """True when this key is an owner's (pinning it on the very first success)."""
     global _owner_hash_cache
     if not bearer:
         return False
     fp = _key_fingerprint(bearer)
-    known = _owner_hash()
+    known = _owner_hashes()
     if known:
-        return hmac.compare_digest(fp, known)
+        return any(hmac.compare_digest(fp, h) for h in known)
     with _owner_hash_lock:
-        known = _owner_hash()
+        known = _owner_hashes()
         if known:
-            return hmac.compare_digest(fp, known)
+            return any(hmac.compare_digest(fp, h) for h in known)
         try:
             ZEN_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             f = _owner_hash_file()
@@ -1061,7 +1072,7 @@ def key_is_owner(bearer):
         except OSError as e:
             log.warning("[imghost] owner-key pin failed (%s) — binding disabled", e)
             return False
-        _owner_hash_cache = fp
+        _owner_hash_cache = {fp}
         return True
 
 
@@ -1124,7 +1135,7 @@ def img_token():
     if client_is_bound():
         return json_resp({"ok": True, "token": IMAGE_UPLOAD_TOKEN}, cors=False)
     bearer = bearer_token(flask_req.headers.get("Authorization", ""))
-    if bearer and _owner_hash() and key_is_owner(bearer):
+    if bearer and _owner_hashes() and key_is_owner(bearer):
         remember_auth_ip(bearer)
         log.info("[imghost] token bootstrap by owner key from %s (no chat needed)",
                  _client_ip())
@@ -1296,8 +1307,13 @@ def proxy_passthrough(path=""):
     # owner's key may ask us to relay this exact request to the API origin
     # JanitorAI was originally configured with. Everything else, including
     # non-owner keys, follows the normal route table.
-    fwd_origin = _validated_forward_origin()
+    fwd_header = (flask_req.headers.get("X-Zen-Forward-Origin") or "").strip()
+    fwd_origin, fwd_reason = _validated_forward_origin()
     neutral = False
+    if fwd_header and not fwd_origin:
+        log.warning("[forward] refused (%s) from %s", fwd_reason, _client_ip())
+        return json_resp({"error": {"message": "Forward refused: " + fwd_reason,
+                                    "type": "proxy_error"}}, 403)
     if fwd_origin:
         provider_key = DEFAULT_PROVIDER
         cfg = UPSTREAMS[provider_key]
