@@ -11,6 +11,7 @@ everything JanitorAI can't while trying to work without anything other than a li
 Basically you just need:
 
 1 - A server (any laptop or old pc you have works although this is mostly aimed at Linux and i am unsure of Windows as i don't have any windows machine)
+
 2 - Ngrok (free to sign up for and a good idea to use than URL link system for permanent deployament)
 
 After setting those two up (Clanker instructions below) it should work fine and this is compatible with desktop and mobile.
