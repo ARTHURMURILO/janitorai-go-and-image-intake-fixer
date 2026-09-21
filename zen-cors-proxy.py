@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, Response, request as flask_req
 
-VERSION = "2.7"
+VERSION = "2.8"
 PORT = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 8081))
 PROXY_UA = os.environ.get("PROXY_USER_AGENT", "janitorai-bridge/" + VERSION)
 SESSION_FILE = os.environ.get(
@@ -68,15 +68,21 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 #              cannot set the key (e.g. /hemmingway/v1/chat/completions).
 # `session_header` - whether to inject OpenCode's x-opencode-session.
 # ---------------------------------------------------------------------------
+# The default upstream (OpenCode slot) can be repointed at any OpenAI
+# compatible API with UPSTREAM_URL, e.g. https://api.xiaomimimo.com/v1.
+_OPencode_URL = os.environ.get("UPSTREAM_URL",
+                               "https://opencode.ai/zen/go/v1").rstrip("/")
+
 UPSTREAMS = {
     "opencode": {
-        "base": os.environ.get("UPSTREAM_URL",
-                               "https://opencode.ai/zen/go/v1").rstrip("/"),
+        "base": _OPencode_URL,
         "label": "OpenCode Go",
         "ua_tag": f"{PROXY_UA} (OpenCode-Go-Compatible)",
         "key_prefix": None,
         "paths": ("/zen/go", "/zen"),
-        "session_header": True,
+        # Only OpenCode Zen wants x-opencode-session; an overridden base
+        # (mimo, anything else) points at a different API that does not.
+        "session_header": "opencode" in _OPencode_URL,
     },
     "hemmingway": {
         "base": os.environ.get("HEMMINGWAY_URL",

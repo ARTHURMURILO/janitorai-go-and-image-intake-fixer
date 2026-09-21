@@ -1,5 +1,15 @@
 # Changelog
 
+## Bridge 2.8
+- **CSP-proof "any API" routing**: JanitorAI's Content-Security-Policy only
+  allows its configured proxy origin, so the forward toggle's in-page
+  reroute gets blocked (`connect-src` violation, generic `NetworkError`).
+  The supported pattern is now "point JanitorAI at the bridge, point the
+  bridge at the API": `UPSTREAM_URL=https://api.xiaomimimo.com/v1` repoints
+  the default route at any OpenAI compatible API (model list, chat, image
+  intake), and `x-opencode-session` is no longer sent when the base is not
+  OpenCode.
+
 ## Bridge 2.7 and userscript 1.9.2
 - **Open by default (the silly images model)**: no token needed to upload.
   Abuse control is a store quota instead: `IMAGE_DIR_MAX_BYTES` (2 GiB by

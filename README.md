@@ -111,6 +111,31 @@ an https origin speaking the OpenAI compatible API. A refused forward answers
 with a clear 403 naming the reason (instead of falling through to some
 default upstream), and the toggle off means everything goes direct again.
 
+> **CSP reality check:** JanitorAI's Content-Security-Policy only allows the
+> origin configured as its proxy URL, so the page level reroute is blocked
+> (`connect-src` violation, surfaced as a generic `NetworkError`) whenever
+> the bridge URL is not itself in that policy. The CSP-proof way to use
+> another API is the pattern below: point JanitorAI at the bridge and let
+> the bridge point at the API.
+
+### Use any API, the CSP-proof way
+
+Keep JanitorAI's proxy URL on your bridge (the one origin its CSP allows)
+and repoint the bridge itself:
+
+```bash
+# ~/Documents/start-zen-proxy.local.sh (gitignored)
+export UPSTREAM_URL="https://api.xiaomimimo.com/v1"   # any OpenAI compatible API
+bash ~/Documents/start-zen-proxy.sh
+```
+
+`UPSTREAM_URL` replaces the default (OpenCode) slot, which is also the
+fallback route: no key prefix matches provider keys, so any key lands there,
+`/v1/models` and chat both relay to the new base, OpenCode's
+`x-opencode-session` header switches off automatically for non-opencode
+bases, and image intake keeps working because the chat still passes through
+the bridge. Delete the line to revert.
+
 ## How sending works
 
 Any `![alt](url)` or bare image URL (`.png/.jpg/.webp/.gif`) in a `user` or
@@ -180,7 +205,7 @@ as its browser shows your key.
 |---|---|---|
 | `PORT` | `8081` (or `argv[1]`) | listen port |
 | `LOG_LEVEL` | `INFO` | logging verbosity |
-| `UPSTREAM_URL` / `HEMMINGWAY_URL` | built-in | override upstream bases |
+| `UPSTREAM_URL` / `HEMMINGWAY_URL` | built-in | override upstream bases; `UPSTREAM_URL` repoints the default route at any OpenAI compatible API (Xiaomi, etc.) |
 | `PROXY_USER_AGENT` | `janitorai-bridge/2.5` | UA sent upstream (tagged, not spoofed) |
 | `SESSION_FILE` | `~/.config/zen-proxy/session` | persisted session id |
 | `IMAGE_INTAKE` | `1` | master switch |
