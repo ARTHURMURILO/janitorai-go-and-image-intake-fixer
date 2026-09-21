@@ -25,7 +25,7 @@ JanitorAI to whatever model your proxy routes to. Two pieces that work
 together:
 
 1. **`zen-cors-proxy.py`**: a dependency-light CORS bridge you run on your own
-   box (v2.3). It
+   box (v2.5). It
    - converts image links inside chat messages into **real multimodal image
      parts** before forwarding upstream (the core feature), and
    - runs a **self-hosted image store** (`POST /img/upload`, `GET /img/<id>`),
