@@ -1,5 +1,14 @@
 # Changelog
 
+## Bridge 2.5 and userscript 1.9.1
+- **Bind without spending a message**: `/img/token` accepts the pinned owner
+  key in `Authorization` and binds the caller immediately, forwarding nothing
+  upstream (no chat, no model call, no tokens). The userscript observes the
+  key from the page's own API traffic and probes it whenever the upload token
+  is missing, so rebinding after a rotation, a new device or TTL expiry is
+  automatic. Trust on first use stays exclusive to successful chats, so an
+  unknown key cannot bootstrap through this door.
+
 ## Bridge 2.4 and userscript 1.9.0
 - **Forward mode** (opt in): point JanitorAI at any API you like and tick
   "Route other APIs through my bridge"; calls are rerouted through your

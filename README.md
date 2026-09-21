@@ -60,8 +60,10 @@ then:
    `janitorai-image-intake.user.js` from this repo. It updates itself from
    GitHub once installed.
 3. Open a chat → buttons appear top-right (📎 attach · 🔗 paste link ·
-   🖼 settings). Send one normal message so the script can learn the bridge URL
-   and fetch the upload token, then attach away.
+   🖼 settings). Your first chat message teaches the script your bridge URL
+   (verified and pinned from then on); your device then binds itself
+   automatically from the page's own API traffic, so throwaway messages are
+   never needed again. Attach away.
 
 ### Why the bridge learns itself
 
@@ -73,7 +75,7 @@ it is adopted:
 1. the host looks like **your** tunnel or LAN (ngrok, tailscale `ts.net`, a
    private IP; a random ngrok or an unrelated API is rejected on sight), and
 2. it **proves it is the bridge** by answering `/healthz` with the bridge
-   shape, for example `{"ok": true, "v": "2.4"}`.
+   shape, for example `{"ok": true, "v": "2.5"}`.
 
 Once a good URL is learned it is **pinned**: nothing can silently repoint it
 again, not a page script, not another ngrok, not localStorage. On every boot
@@ -83,9 +85,11 @@ start over. You can also forget it yourself: clear the URL field in Advanced
 and Save.
 
 Fetching the upload token then works with zero setup: `/img/token` answers
-because your device recently chatted through the tunnel with your key.
-Rotating the token later is just `rm ~/.config/zen-proxy/upload-token` +
-restart; every device re-fetches on its next attach.
+when your device shows the pinned owner key (the page already sends it on
+every API call, and the script probes with it silently) or when the device
+chatted recently. Rotating the token later is just
+`rm ~/.config/zen-proxy/upload-token` + restart; every device re-fetches on
+its next attach, no messages involved.
 
 ### Use any API: forward mode
 
@@ -137,7 +141,7 @@ stripped, so a dead URL stays visible in the message.
 | `GET /img/token` | owner-only | hands the upload token to the owner's devices |
 | `GET /intake.user.js` | public | serves the userscript for one-tap install |
 | `POST /v1/chat/completions` | your provider key | the proxied API JanitorAI talks to |
-| `GET /healthz` | public | `{"ok":true,"v":"2.3"}` |
+| `GET /healthz` | public | `{"ok":true,"v":"2.5"}` |
 
 ### Who counts as "the owner"
 
@@ -147,11 +151,22 @@ stripped, so a dead URL stays visible in the message.
 - an IP that **recently completed an authenticated chat** through the tunnel
   (upstream answered `<400`), within a 12h TTL, and only when the key used is
   the **owner key** pinned on first success (`OWNER_KEY_SHA256` overrides;
-  `~/.config/zen-proxy/owner-key.sha256` is the pin).
+  `~/.config/zen-proxy/owner-key.sha256` is the pin), or
+- a request that simply **shows the owner key** in `Authorization`: it binds
+  the caller and returns the token with **nothing forwarded upstream**, so no
+  chat is sent, no model call is made and no tokens are spent. The userscript
+  does this for you from the page's own API traffic.
+
+Only the very first pin needs one real chat message: trust on first use
+happens exclusively on a successful chat, so an unknown key can never
+bootstrap itself. The same applies when you change the key you use in
+JanitorAI: delete `~/.config/zen-proxy/owner-key.sha256` (or set
+`OWNER_KEY_SHA256`) and send one message with the new key.
 
 Fake keys never bind. `X-Forwarded-For` is trusted only from the loopback
 tunnel peer, and only its last (edge-appended) hop. Devices behind one NAT
-share a binding; a phone on mobile data binds itself with one chat message.
+share a binding; a phone on mobile data binds itself automatically as soon
+as its browser shows your key.
 
 ## Bridge env knobs
 
@@ -160,7 +175,7 @@ share a binding; a phone on mobile data binds itself with one chat message.
 | `PORT` | `8081` (or `argv[1]`) | listen port |
 | `LOG_LEVEL` | `INFO` | logging verbosity |
 | `UPSTREAM_URL` / `HEMMINGWAY_URL` | built-in | override upstream bases |
-| `PROXY_USER_AGENT` | `janitorai-bridge/2.3` | UA sent upstream (tagged, not spoofed) |
+| `PROXY_USER_AGENT` | `janitorai-bridge/2.5` | UA sent upstream (tagged, not spoofed) |
 | `SESSION_FILE` | `~/.config/zen-proxy/session` | persisted session id |
 | `IMAGE_INTAKE` | `1` | master switch |
 | `IMAGE_INTAKE_MAX_IMAGES` | `4` | max images per request |
