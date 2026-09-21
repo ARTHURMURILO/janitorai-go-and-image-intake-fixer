@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI: Real Image Intake (bridge companion)
 // @namespace    https://github.com/ARTHURMURILO/janitorai-go-and-image-intake-fixer
-// @version      1.9.1
+// @version      1.9.2
 // @description  One-click image attach that uploads to YOUR server's image store (zen-bridge /img/upload), renders external image links in chat, and pairs with the bridge's real image intake. No JanitorAI Media Library needed.
 // @author       Arthur + Pi
 // @license      MIT
@@ -58,6 +58,7 @@
     bridgeManual: false,    // true when the user typed a base by hand
     bridgePinned: false,    // a verified bridge: auto-learning stops for good
     forwardMode: false,     // opt-in: reroute other APIs through the bridge
+    storeOpen: false,       // bridge told us: store needs no token at all
     uploadToken: '',        // auto-fetched from the bridge (owner-bound)
   };
   let settings = Object.assign({}, DEFAULTS);
@@ -565,13 +566,19 @@
       const d = parseJsonSafe(r.text);
       if (d && d.token) {
         settings.uploadToken = d.token;
+        settings.storeOpen = false;
         saveSettings();
         lastBindFailAt = 0;
         refreshSheetStatus();
         toast('Device bound automatically ✓ no message needed');
         return true;
       }
-      if (d && d.auth === 'disabled') { settings.uploadToken = ''; saveSettings(); return true; }
+      if (d && d.auth === 'disabled') {
+        settings.uploadToken = '';
+        settings.storeOpen = true;
+        saveSettings();
+        return true;
+      }
     } catch (e) { /* bridge offline */ }
     return false;
   }
@@ -593,9 +600,15 @@
         return false;
       }
       const d = parseJsonSafe(r.text);
-      if (d && d.auth === 'disabled') { settings.uploadToken = ''; saveSettings(); return true; }
+      if (d && d.auth === 'disabled') {
+        settings.uploadToken = '';
+        settings.storeOpen = true;   // open store: no token needed, ever
+        saveSettings();
+        return true;
+      }
       if (d && d.token) {
         settings.uploadToken = d.token;
+        settings.storeOpen = false;
         saveSettings();
         dlog('upload token auto-provisioned from bridge bootstrap');
         return true;
@@ -1229,7 +1242,9 @@
       return;
     }
     st.textContent = 'Bridge: ' + base.replace(/^https?:\/\//, '').slice(0, 40) +
-      (settings.uploadToken ? ' · ready ✓' : ' · token auto-fetches once you chat');
+      (settings.uploadToken ? ' · ready ✓'
+        : settings.storeOpen ? ' · open store (no token needed) ✓'
+        : ' · token auto-fetches once you chat');
   }
 
   function openSheet(show, note) {

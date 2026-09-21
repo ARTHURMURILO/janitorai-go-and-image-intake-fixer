@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, Response, request as flask_req
 
-VERSION = "2.6"
+VERSION = "2.7"
 PORT = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 8081))
 PROXY_UA = os.environ.get("PROXY_USER_AGENT", "janitorai-bridge/" + VERSION)
 SESSION_FILE = os.environ.get(
@@ -186,6 +186,12 @@ IMAGE_DIR = pathlib.Path(os.environ.get("IMAGE_DIR",
                                         str(pathlib.Path.home() / "Documents" / "zen-images")))
 IMAGE_PUBLIC_HOST = os.environ.get("IMAGE_PUBLIC_HOST", "").rstrip("/")
 
+# Abuse ceiling for the (open) image store: once the store exceeds this,
+# oldest files are evicted on the next upload. This is the entire security
+# model for casual use: public reads, open writes, bounded disk.
+IMAGE_DIR_MAX_BYTES = int(os.environ.get(
+    "IMAGE_DIR_MAX_BYTES", str(2 * 1024 * 1024 * 1024)))  # default 2 GiB
+
 # Secrets live OUTSIDE IMAGE_DIR on purpose. The store is served publicly, so
 # anything parked next to the images is one routing slip away from being
 # readable — /img/.upload-token being publicly fetchable is exactly that bug.
@@ -218,19 +224,22 @@ def serve_userscript():
 
 
 def _load_or_create_upload_token():
-    """Env token wins; 'off' disables auth; otherwise generate once + persist."""
-    tok = os.environ.get("IMAGE_UPLOAD_TOKEN", "").strip()
-    if tok.lower() in ("off", "0", "no", "none"):
+    """Open by default: the store exists for casual images and a quota
+    (IMAGE_DIR_MAX_BYTES, 2 GiB by default) with oldest-first eviction is
+    the abuse control.
+
+    The optional token system stays for setups that want it:
+      IMAGE_UPLOAD_TOKEN=on      -> generate one once, persist it, enforce it
+      IMAGE_UPLOAD_TOKEN=<value> -> enforce your own value
+      unset / off / open         -> no token needed at all (the default)
+    """
+    raw = os.environ.get("IMAGE_UPLOAD_TOKEN", "").strip()
+    if not raw or raw.lower() in ("off", "0", "no", "none", "open"):
         return ""
-    if tok:
-        return tok
+    if raw.lower() not in ("on", "auto", "1", "yes"):
+        return raw
     tokfile = ZEN_CONFIG_DIR / "upload-token"
-    legacy = IMAGE_DIR / ".upload-token"
     try:
-        if not tokfile.exists() and legacy.exists():  # migrate pre-2.3 layout
-            ZEN_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            tokfile.write_text(legacy.read_text())
-            legacy.unlink(missing_ok=True)
         if tokfile.exists():
             t = tokfile.read_text().strip()
             if t:
@@ -242,7 +251,7 @@ def _load_or_create_upload_token():
             tokfile.chmod(0o600)
         except OSError:
             pass
-        log.info("[imghost] generated upload token in %s", tokfile)
+        log.info("[imghost] upload token enabled (generated) in %s", tokfile)
         return tok
     except OSError as e:
         log.warning("[imghost] token persistence failed (%s) — using ephemeral", e)
@@ -720,28 +729,25 @@ def _validated_forward_origin():
     """(origin, refusal_reason) for the X-Zen-Forward-Origin relay request.
 
     An absent header is not a forward request at all: (None, ""). A present
-    but refused header returns a reason that is handed to JanitorAI verbatim:
-    the old silent fallthrough showed users a misleading 401 from whichever
-    default upstream happened to answer instead. Only the owner key set may
-    ask for a relay, and only to public https targets: the tunnel is on the
-    internet, so this must never become a general relay or an SSRF trampoline.
+    but refused header returns a reason that is handed to JanitorAI verbatim.
+
+    No key ceremony: forward mode exists to relay to whatever
+    OpenAI-compatible API JanitorAI is configured with, using the key the
+    user gave JanitorAI. The only checks left are shape ones: https, no
+    embedded credentials, and a public target (the bridge must never become
+    an LAN/metadata prober if a tunnel URL ever leaks).
     """
     raw = (flask_req.headers.get("X-Zen-Forward-Origin") or "").strip()
     if not raw:
         return None, ""
     if "," in raw:  # duplicated header (or a comma): refuse to guess
         return None, "duplicated X-Zen-Forward-Origin header"
-    bearer = bearer_token(flask_req.headers.get("Authorization", ""))
-    if not (_owner_hashes() and key_is_owner(bearer)):
-        return None, ("the API key in this request is not in the owner set; "
-                      "hash it with printf %s 'YOUR-KEY' | sha256sum and add "
-                      "it to OWNER_KEY_SHA256 in start-zen-proxy.local.sh")
     try:
         parts = urllib.parse.urlsplit(raw)
     except ValueError:
         return None, "unparsable target URL"
     if parts.scheme != "https" or not parts.hostname:
-        return None, "target must be a public https origin"
+        return None, "target must be a public https origin (OpenAI compatible)"
     if parts.username or parts.password:
         return None, "target must not embed credentials"
     if not _is_fetchable_public_url(raw):
@@ -1147,6 +1153,41 @@ def img_token():
                                 "type": "auth_error"}}, 403, cors=False)
 
 
+def _enforce_image_quota():
+    """Oldest-first eviction once the store exceeds IMAGE_DIR_MAX_BYTES.
+
+    This is the abuse story for an open store: random uploads cannot grow the
+    disk past the cap, and nobody needs a token to keep sharing images.
+    """
+    if IMAGE_DIR_MAX_BYTES <= 0:
+        return
+    try:
+        entries = []
+        total = 0
+        with os.scandir(IMAGE_DIR) as it:
+            for e in it:
+                if not e.is_file():
+                    continue
+                st = e.stat()
+                entries.append((st.st_mtime, st.st_size, e.name))
+                total += st.st_size
+        if total <= IMAGE_DIR_MAX_BYTES:
+            return
+        entries.sort()  # oldest first
+        for _mtime, size, name in entries:
+            if total <= IMAGE_DIR_MAX_BYTES:
+                break
+            try:
+                (IMAGE_DIR / name).unlink(missing_ok=True)
+                total -= size
+                log.info("[imghost] quota evicted %s (%.1f KB), store now %.1f MB / %.1f MB",
+                         name, size / 1024.0, total / 1e6, IMAGE_DIR_MAX_BYTES / 1e6)
+            except OSError:
+                pass
+    except OSError as e:
+        log.warning("[imghost] quota check failed: %s", e)
+
+
 def _persist_image_bytes(raw_chunks, orig_name):
     """Write image bytes to the store. Returns (name, total)."""
     orig = orig_name or "image.png"
@@ -1177,6 +1218,7 @@ def _persist_image_bytes(raw_chunks, orig_name):
             "size": total,  # a full path here leaked the owner's disk layout
             "at": datetime.now(timezone.utc).isoformat()}
     (IMAGE_DIR / (name + ".json")).write_text(json.dumps(meta))
+    _enforce_image_quota()
     return name, mime, total
 
 

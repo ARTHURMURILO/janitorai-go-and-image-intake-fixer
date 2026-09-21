@@ -1,5 +1,18 @@
 # Changelog
 
+## Bridge 2.7 and userscript 1.9.2
+- **Open by default (the silly images model)**: no token needed to upload.
+  Abuse control is a store quota instead: `IMAGE_DIR_MAX_BYTES` (2 GiB by
+  default) with oldest-first eviction on every upload. Setting
+  `IMAGE_UPLOAD_TOKEN=on` (or a fixed value) opts into the full token,
+  binding and owner-key system for the security conscious.
+- **Forward mode needs no key ceremony**: the relay uses whatever API key
+  JanitorAI was configured with; the target only has to be an https origin
+  speaking an OpenAI compatible API. No `OWNER_KEY_SHA256` step needed for
+  third-party APIs such as Xiaomi.
+- The ⚙ sheet now reports "open store (no token needed)" instead of
+  promising a token that will never come.
+
 ## Bridge 2.6
 - **Multiple owner keys**: `OWNER_KEY_SHA256` now accepts a comma separated
   list and is unioned with the trust-on-first-use pin instead of replacing

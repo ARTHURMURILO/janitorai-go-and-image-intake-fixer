@@ -12,6 +12,9 @@ import tempfile
 
 _tmp = pathlib.Path(tempfile.mkdtemp(prefix="zen-sec-"))
 os.environ["IMAGE_PUBLIC_HOST"] = "https://test-ngrok.example.dev"
+# Token mode ON for this suite (M2/TOK checks exercise enforcement); the
+# open-by-default behaviour is asserted separately below.
+os.environ["IMAGE_UPLOAD_TOKEN"] = "sec-token-123"
 os.environ["IMAGE_DIR"] = str(_tmp / "images")
 os.environ["ZEN_CONFIG_DIR"] = str(_tmp / "config")
 
@@ -232,15 +235,13 @@ check("FWD neutral mode adds no opencode session header",
       not any(k.lower() == "x-opencode-session" for k in _fwd_seen.get("headers", {})),
       _fwd_seen.get("headers"))
 
-_calls = _fwd_seen.get("calls", 0)
 r = client.post("/v1/chat/completions", json=_fwd_body,
-                headers={"Authorization": "Bearer attacker-key",
-                         "X-Zen-Forward-Origin": "https://api.evil.example"})
-check("FWD non-owner key refused with 403", r.status_code == 403, r.status_code)
-check("FWD refusal never contacts the upstream",
-      _fwd_seen.get("calls", 0) == _calls, _fwd_seen.get("calls"))
-check("FWD refusal tells the user how to fix it",
-      b"OWNER_KEY_SHA256" in r.get_data(), r.get_data()[:200])
+                headers={"Authorization": "Bearer any-third-party-key",
+                         "X-Zen-Forward-Origin": "https://example.org"})
+check("FWD relays with whatever key JanitorAI was given (no key ceremony)",
+      r.status_code != 403 and
+      str(_fwd_seen.get("url", "")).startswith("https://example.org/v1/chat/completions"),
+      (r.status_code, _fwd_seen.get("url")))
 
 _calls = _fwd_seen.get("calls", 0)
 r = client.post("/v1/chat/completions", json=_fwd_body,
@@ -248,8 +249,44 @@ r = client.post("/v1/chat/completions", json=_fwd_body,
                          "X-Zen-Forward-Origin": "http://169.254.169.254/latest"})
 check("FWD http / link-local target refused with 403",
       r.status_code == 403, r.status_code)
+check("FWD refusal names the reason",
+      b"public https origin" in r.get_data(), r.get_data()[:200])
 check("FWD refused target never contacted",
       _fwd_seen.get("calls", 0) == _calls, _fwd_seen.get("calls"))
+
+# --- Open store by default + 2 GiB quota with oldest-first eviction ---------
+_env_tok = os.environ.pop("IMAGE_UPLOAD_TOKEN", None)
+try:
+    check("STORE open by default (no env token at all)",
+          m._load_or_create_upload_token() == "",
+          m._load_or_create_upload_token())
+finally:
+    if _env_tok is not None:
+        os.environ["IMAGE_UPLOAD_TOKEN"] = _env_tok
+
+_qdir = m.IMAGE_DIR
+_qdir.mkdir(parents=True, exist_ok=True)
+(_qdir / "0000000001-old.png").write_bytes(b"old" * 100)
+(_qdir / "0000000002-mid.png").write_bytes(b"mid" * 100)
+(_qdir / "0000000003-new.png").write_bytes(b"new" * 100)
+import time as _t
+_now = _t.time()
+os.utime(_qdir / "0000000001-old.png", (_now - 300, _now - 300))
+os.utime(_qdir / "0000000002-mid.png", (_now - 100, _now - 100))
+os.utime(_qdir / "0000000003-new.png", (_now, _now))
+_real_quota = m.IMAGE_DIR_MAX_BYTES
+m.IMAGE_DIR_MAX_BYTES = 700  # three 300-byte files cannot fit
+try:
+    m._enforce_image_quota()
+finally:
+    m.IMAGE_DIR_MAX_BYTES = _real_quota
+check("QUOTA oldest file evicted first",
+      not (_qdir / "0000000001-old.png").exists())
+check("QUOTA newest survives when the cap fits it",
+      (_qdir / "0000000003-new.png").exists())
+check("QUOTA brings the store under the cap",
+      sum(f.stat().st_size for f in _qdir.glob("0000000*.png")) <= 700,
+      [f.name for f in _qdir.glob("0000000*.png")])
 
 print("\nSECURITY_TESTS_" + ("OK" if not _fail else "FAILED: " + ", ".join(_fail)))
 raise SystemExit(1 if _fail else 0)

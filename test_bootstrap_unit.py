@@ -11,6 +11,8 @@ import tempfile
 
 _tmp = pathlib.Path(tempfile.mkdtemp(prefix="zen-test-"))
 os.environ["IMAGE_PUBLIC_HOST"] = "https://test-ngrok.example.dev"
+# Token mode ON for this suite: these tests exercise bind/bootstrap gating.
+os.environ["IMAGE_UPLOAD_TOKEN"] = "boot-token-123"
 os.environ["IMAGE_DIR"] = str(_tmp / "images")
 os.environ["ZEN_CONFIG_DIR"] = str(_tmp / "config")
 

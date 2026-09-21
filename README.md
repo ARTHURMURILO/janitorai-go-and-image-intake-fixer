@@ -25,7 +25,7 @@ JanitorAI to whatever model your proxy routes to. Two pieces that work
 together:
 
 1. **`zen-cors-proxy.py`**: a dependency-light CORS bridge you run on your own
-   box (v2.5). It
+   box (v2.7). It
    - converts image links inside chat messages into **real multimodal image
      parts** before forwarding upstream (the core feature), and
    - runs a **self-hosted image store** (`POST /img/upload`, `GET /img/<id>`),
@@ -84,12 +84,13 @@ the learned URL is re-checked, and one that answers like something else (the
 start over. You can also forget it yourself: clear the URL field in Advanced
 and Save.
 
-Fetching the upload token then works with zero setup: `/img/token` answers
-when your device shows the pinned owner key (the page already sends it on
-every API call, and the script probes with it silently) or when the device
-chatted recently. Rotating the token later is just
-`rm ~/.config/zen-proxy/upload-token` + restart; every device re-fetches on
-its next attach, no messages involved.
+There is **no token to fetch on the default open store**: `/img/token`
+reports `auth: disabled`, the ⚙ sheet says "open store (no token needed)",
+and uploads just work. If you opt into token mode (below), `/img/token`
+answers when your device shows the pinned owner key (the page already sends
+it on every API call, and the script probes with it silently) or when the
+device chatted recently, and rotating the token is just
+`rm ~/.config/zen-proxy/upload-token` + restart.
 
 ### Use any API: forward mode
 
@@ -104,25 +105,11 @@ sheet. Then:
 - the bridge relays them there, so you still get image intake, self hosting
   and the 4 image cap for **any** provider.
 
-Forwarding only works with a key from the **owner set**, only over https,
-and only to public hosts. A refused forward answers with a clear 403 that
-names the fix (instead of silently falling through to some default upstream),
-and the toggle off means everything goes direct again.
-
-Because JanitorAI has one key slot, forward mode puts your *target API's* key
-there (Xiaomi's key, say). Tell the bridge it is yours, once:
-
-```bash
-printf %s 'YOUR-XIAOMI-KEY' | sha256sum
-# then, on the server (gitignored file):
-echo 'export OWNER_KEY_SHA256="<hash-from-above>"' >> ~/Documents/start-zen-proxy.local.sh
-bash ~/Documents/start-zen-proxy.sh
-```
-
-`OWNER_KEY_SHA256` takes a comma separated list and is **unioned with the
-existing pin**, so your original key keeps working. Keys added this way are
-full owner keys: they also drive device binding, so phones using forward mode
-bind automatically too.
+Forwarding needs **no key ceremony at all**: the relay uses exactly the API
+key you gave JanitorAI, and the only requirement on the target is that it is
+an https origin speaking the OpenAI compatible API. A refused forward answers
+with a clear 403 naming the reason (instead of falling through to some
+default upstream), and the toggle off means everything goes direct again.
 
 ## How sending works
 
@@ -152,16 +139,19 @@ stripped, so a dead URL stays visible in the message.
 
 | route | auth | purpose |
 |---|---|---|
-| `POST /img/upload` | `X-Upload-Token` header | multipart `file` **or** JSON `{name, data:<base64>}` → `{ok,path,url,id,size}` |
+| `POST /img/upload` | open by default (token optional) | multipart `file` **or** JSON `{name, data:<base64>}` → `{ok,path,url,id,size}` |
 | `GET /img/<id>.<ext>` | public | serves a stored image (immutable cache, no CORS) |
-| `GET /img/token` | owner-only | hands the upload token to the owner's devices |
+| `GET /img/token` | owner-only (token mode) | hands over the upload token, or reports `auth: disabled` on an open store |
 | `GET /intake.user.js` | public | serves the userscript for one-tap install |
 | `POST /v1/chat/completions` | your provider key | the proxied API JanitorAI talks to |
 | `GET /healthz` | public | `{"ok":true,"v":"2.5"}` |
 
-### Who counts as "the owner"
+### Who counts as "the owner" (token mode only)
 
-`/img/token` answers only when the caller is provably one of your devices:
+Everything below applies only when you opt into the token system with
+`IMAGE_UPLOAD_TOKEN=on` (or a fixed value). The default open store has
+nothing to gate. When enabled, `/img/token` answers only when the caller is
+provably one of your devices:
 
 - a **direct LAN/loopback hit** (private peer, no proxy headers), or
 - an IP that **recently completed an authenticated chat** through the tunnel
@@ -202,8 +192,9 @@ as its browser shows your key.
 | `IMAGE_INTAKE_HOSTS` | *(all public)* | optional host allowlist for intake |
 | `IMAGE_INTAKE_CACHE` | `128` | LRU entries of fetched images |
 | `IMAGE_PUBLIC_HOST` | *(unset)* | public base used in upload URLs; set it, or links come back relative |
-| `IMAGE_UPLOAD_TOKEN` | auto-generated | upload auth; `off` disables (not recommended) |
+| `IMAGE_UPLOAD_TOKEN` | *(unset = open)* | unset/`off`: open store, no token (default); `on`: generate one and enforce; any other value: enforce that value |
 | `IMAGE_DIR` | `~/Documents/zen-images` | image storage |
+| `IMAGE_DIR_MAX_BYTES` | `2 GiB` | store quota; oldest files are evicted past it (0 = unlimited) |
 | `ZEN_CONFIG_DIR` | `~/.config/zen-proxy` | token + owner-key pin (kept out of `IMAGE_DIR` on purpose) |
 | `USERSCRIPT_FILE` | `./janitorai-image-intake.user.js` | file served at `/intake.user.js` |
 | `OWNER_KEY_SHA256` | *(unset)* | comma-separated owner key hashes; skips trust-on-first-use |
@@ -237,13 +228,18 @@ This bridge holds your provider key and stores images, so it is deliberately
 paranoid (see [`AUDIT-REPORT.md`](AUDIT-REPORT.md) for the full audit and the
 fixes that followed it):
 
+- **Open by default, on purpose**: the store is public read and public
+  write because it holds casual images, and abuse is bounded by a quota
+  (`IMAGE_DIR_MAX_BYTES`, 2 GiB default) with oldest-first eviction on every
+  upload. Set `IMAGE_UPLOAD_TOKEN=on` to swap in the full token, binding and
+  owner-key system if you want the extra lock.
 - `/img/<name>` serves **only** files the bridge itself created (strict name
   pattern), so `/img/.upload-token` (a real past exposure) is impossible now.
 - Secrets live in `ZEN_CONFIG_DIR`, never in the publicly served image dir.
 - `/img/*` sends **no CORS headers**: a random website cannot read the token
   endpoint out of your browser.
-- Binding requires the owner's key (TOFU-pinned), so having *any* valid
-  JanitorAI key is not enough to collect your upload token.
+- In token mode, binding requires the owner's key (TOFU-pinned), so having
+  *any* valid JanitorAI key is not enough to collect your upload token.
 - Intake fetches are SSRF-gated: loopback, link-local (cloud metadata), and
   private ranges are refused, redirects are re-validated hop by hop, and the
   optional `IMAGE_INTAKE_HOSTS` allowlist matches bare hostnames.
