@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, Response, request as flask_req
 
-VERSION = "2.4"
+VERSION = "2.5"
 PORT = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 8081))
 PROXY_UA = os.environ.get("PROXY_USER_AGENT", "janitorai-bridge/" + VERSION)
 SESSION_FILE = os.environ.get(
@@ -1108,13 +1108,26 @@ def client_is_bound():
 def img_token():
     """Zero-setup bootstrap: hand the upload token to the user's own network.
 
-    The userscript calls this once from a home connection and stores the
-    result — no manual copy-paste. Anyone else (public internet) gets 403.
-    Never CORS-open: a browser page must not be able to read this response.
+    Accepted proofs, cheapest first:
+      1. already-bound IP or a direct LAN/loopback hit;
+      2. Authorization carries the pinned OWNER key: binds the caller and
+         returns the token immediately. Nothing is forwarded upstream, so no
+         chat message is sent and no model call is spent (this replaces the
+         old "send one chat message to bind" dance). Trust-on-first-use stays
+         exclusive to successful chats, so an unknown key cannot bootstrap
+         itself through this door.
+    Anyone else (public internet) gets 403. Never CORS-open: a browser page
+    must not be able to read this response.
     """
     if not IMAGE_UPLOAD_TOKEN:
         return json_resp({"ok": True, "token": "", "auth": "disabled"}, cors=False)
     if client_is_bound():
+        return json_resp({"ok": True, "token": IMAGE_UPLOAD_TOKEN}, cors=False)
+    bearer = bearer_token(flask_req.headers.get("Authorization", ""))
+    if bearer and _owner_hash() and key_is_owner(bearer):
+        remember_auth_ip(bearer)
+        log.info("[imghost] token bootstrap by owner key from %s (no chat needed)",
+                 _client_ip())
         return json_resp({"ok": True, "token": IMAGE_UPLOAD_TOKEN}, cors=False)
     log.info("[imghost] token bootstrap refused for non-private client %s (xff=%s)",
              flask_req.remote_addr,

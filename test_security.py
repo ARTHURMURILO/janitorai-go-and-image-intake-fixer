@@ -147,6 +147,38 @@ r = client.post("/img/upload", json={"name": "x.png", "data": "aGk="},
                 headers={"X-Upload-Token": "wrong"})
 check("M2 wrong upload token rejected", r.status_code == 401, r.status_code)
 
+# --- /img/token by owner key: bind without spending a chat message ----------
+m._seen_auth_ips.clear()
+r = client.get("/img/token",
+               headers={"X-Forwarded-For": "203.0.113.55",
+                        "Authorization": "Bearer owner-key"})
+check("TOK owner key binds an unbound IP", r.status_code == 200, r.status_code)
+check("TOK token handed to the owner key", b'"token"' in r.get_data(), r.get_data()[:80])
+r = client.get("/img/token", headers={"X-Forwarded-For": "203.0.113.55"})
+check("TOK binding persisted (plain GET now works too)", r.status_code == 200, r.status_code)
+m._seen_auth_ips.clear()
+r = client.get("/img/token",
+               headers={"X-Forwarded-For": "203.0.113.66",
+                        "Authorization": "Bearer attacker-key"})
+check("TOK stranger key still refused", r.status_code == 403, r.status_code)
+
+# no trust-on-first-use through this door: unknown key + fresh bridge
+m._owner_hash_cache = None
+try:
+    (m.ZEN_CONFIG_DIR / "owner-key.sha256").unlink()
+except OSError:
+    pass
+r = client.get("/img/token",
+               headers={"X-Forwarded-For": "203.0.113.77",
+                        "Authorization": "Bearer fresh-key"})
+check("TOK unknown key cannot bootstrap a fresh bridge (no TOFU here)",
+      r.status_code == 403, r.status_code)
+check("TOK and does not pin itself",
+      not (m.ZEN_CONFIG_DIR / "owner-key.sha256").exists())
+# restore the pin for the forward tests below
+m._owner_hash_cache = None
+m.key_is_owner("owner-key")
+
 # --- Forward mode: owner key only, public https targets only -----------------
 _fwd_seen = {}
 

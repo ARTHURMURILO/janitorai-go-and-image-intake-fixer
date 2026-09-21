@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI: Real Image Intake (bridge companion)
 // @namespace    https://github.com/ARTHURMURILO/janitorai-go-and-image-intake-fixer
-// @version      1.9.0
+// @version      1.9.1
 // @description  One-click image attach that uploads to YOUR server's image store (zen-bridge /img/upload), renders external image links in chat, and pairs with the bridge's real image intake. No JanitorAI Media Library needed.
 // @author       Arthur + Pi
 // @license      MIT
@@ -545,10 +545,42 @@
   // Zero-setup bootstrap: when on the owner's home network, the bridge hands
   // out the upload token to us automatically (GET /img/token is private-IP
   // gated server-side). Falls back to manual paste when remote.
+  // Bind without spending a message: show the owner key (observed from the
+  // page's own API traffic) to /img/token. The bridge verifies the pinned
+  // hash, binds this IP and returns the upload token without forwarding
+  // anything upstream, so no chat is sent and no model call is made.
+  // The key itself is kept in memory only: never stored, never logged.
+  let lastKey = '';
+  let lastKeyProbeAt = 0;
+  async function tryAutoBind(bearer) {
+    if (settings.uploadToken || !bearer) return false;
+    const base = bridgeBase();
+    if (!base) return false;
+    lastKeyProbeAt = Date.now();
+    try {
+      const r = await gmFetch('GET', base + '/img/token', {
+        headers: { Authorization: /^bearer\s/i.test(bearer) ? bearer : 'Bearer ' + bearer },
+      });
+      if (!r.ok) return false;
+      const d = parseJsonSafe(r.text);
+      if (d && d.token) {
+        settings.uploadToken = d.token;
+        saveSettings();
+        lastBindFailAt = 0;
+        refreshSheetStatus();
+        toast('Device bound automatically ✓ no message needed');
+        return true;
+      }
+      if (d && d.auth === 'disabled') { settings.uploadToken = ''; saveSettings(); return true; }
+    } catch (e) { /* bridge offline */ }
+    return false;
+  }
+
   async function ensureUploadToken(retry = true) {
     if (settings.uploadToken) return true;
     const base = bridgeBase();
     if (!base) return false;
+    if (lastKey && await tryAutoBind(lastKey)) return true;
     try {
       const r = await gmFetch('GET', base + '/img/token');
       if (!r.ok) {
@@ -676,6 +708,29 @@
           return { target: BRIDGE + u.pathname + u.search, origin: u.origin };
         } catch (e) { return null; }
       }
+      // Observe the Authorization header the page sends (it holds the owner
+      // key) so the sandbox can bind this device without a throwaway chat.
+      // The page already knows its own key; nothing new is exposed.
+      function emitKey(value) {
+        try {
+          window.dispatchEvent(new CustomEvent('ji-observed-key',
+            { detail: { nonce: NONCE, key: String(value) } }));
+        } catch (e) { /* never break the page */ }
+      }
+      function grabAuth(config) {
+        try {
+          const h = config && config.headers;
+          if (!h) return;
+          if (typeof Headers !== 'undefined' && h instanceof Headers) {
+            const v = h.get('Authorization') || h.get('authorization');
+            if (v) emitKey(v);
+          } else if (Array.isArray(h)) {
+            for (const p of h) if (p && String(p[0]).toLowerCase() === 'authorization') emitKey(String(p[1]));
+          } else if (typeof h === 'object') {
+            for (const k of Object.keys(h)) if (k.toLowerCase() === 'authorization') emitKey(h[k]);
+          }
+        } catch (e) { /* headers not readable */ }
+      }
       const origFetch = window.fetch;
       window.fetch = async function (...args) {
         if (window.__ji_gen !== GEN) return origFetch.apply(this, args);
@@ -683,6 +738,7 @@
           const [resource, config] = args;
           const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
           const method = (config && config.method) || (resource && resource.method) || 'GET';
+          grabAuth(config);
           consider(url, method);
           if (typeof resource === 'string') {
             const plan = forwardPlan(resource);
@@ -704,6 +760,13 @@
       };
       const XHR = XMLHttpRequest.prototype;
       const origOpen = XHR.open;
+      const origSRH = XHR.setRequestHeader;
+      XHR.setRequestHeader = function (name, value) {
+        try {
+          if (String(name).toLowerCase() === 'authorization') emitKey(value);
+        } catch (e) { /* never break the page */ }
+        return origSRH.apply(this, arguments);
+      };
       XHR.open = function (method, url) {
         if (window.__ji_gen === GEN) {
           try { consider(url, method); } catch (e) { /* same */ }
@@ -836,11 +899,25 @@
 
   window.addEventListener('ji-bridge-url', (e) => {
     const d = e.detail || {};
-    // US-1: unsigned events are dropped — see injectBridgeSniffer().
+    // Nonce-signed events only (see reapplyPageHooks).
     if (!sniffNonce || d.nonce !== sniffNonce) {
-      dlog('ignored unsigned bridge-url event');      return;
+      dlog('ignored unsigned bridge-url event');
+      return;
     }
     if (d.url) learnBridgeFromUrl(d.url, 'sniffer');
+  });
+
+  // The page's own API traffic carries the owner key (even the model list
+  // request does). Observe it and, while we still lack the upload token, use
+  // it to bind this device silently. Throttled, and only runs when there is
+  // something to gain.
+  window.addEventListener('ji-observed-key', (e) => {
+    const d = e.detail || {};
+    if (!sniffNonce || d.nonce !== sniffNonce || !d.key) return;
+    lastKey = d.key;   // memory only: never persisted or logged
+    if (settings.uploadToken) return;
+    if (Date.now() - lastKeyProbeAt < 15000) return;
+    tryAutoBind(lastKey).catch(() => {});
   });
 
   // ------------------------------------------------------------------
@@ -1072,12 +1149,13 @@
           </div>
         </details>
         <button type="button" class="${CSS_PREFIX}btn ghost" data-role="close">Close</button>
-        <p class="${CSS_PREFIX}hint">Zero setup: send one chat message and I learn the
-        bridge URL from it, verify it is really your bridge, pin it so nothing
-        else can repoint it, and fetch the upload token (your devices are
-        recognized automatically). 📎 then uploads to your server and the
-        model receives the real pixels. Advanced lets you clear the URL to let
-        it learn again. "Route other APIs" makes JanitorAI keep using any API
+        <p class="${CSS_PREFIX}hint">Zero setup: one chat request and I learn the
+        bridge URL from it, verify it is really your bridge, and pin it so
+        nothing else can repoint it. Your device then binds itself from the
+        page's own API traffic using your key: no throwaway message, no wasted
+        reply, no tokens burned. 📎 uploads to your server and the model
+        receives the real pixels. Advanced lets you clear the URL to let it
+        learn again. "Route other APIs" makes JanitorAI keep using any API
         you point it at (Xiaomi, anything) while every call is quietly passed
         through your bridge for image intake.</p>
       </div>`;

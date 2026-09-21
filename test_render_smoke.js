@@ -366,6 +366,29 @@ const anchors = (w) => [...w.document.querySelectorAll('[data-index] a[href]')]
     ok(r.__u === 'https://api.xiaomimimo.com/v1/chat/completions', 'no rewrite when the toggle is off');
   }
 
+  console.log('\n18) auto bind: an observed owner key binds the device, no message sent');
+  {
+    // Bridge already learned (the real precondition: learn happens from the
+    // same request traffic that carries the key).
+    const { w } = makeDom(`<div data-index="0"><div>hi</div></div>`, {
+      settings: { bridgeBase: 'https://mybridge.example', bridgeManual: true },
+    });
+    await flush(w);
+    const NONCE = 'ab'.repeat(16);
+    const fire = (key, nonce) => w.dispatchEvent(
+      new w.CustomEvent('ji-observed-key', { detail: { key, nonce } }));
+
+    fire('Bearer wrong-nonce-key', 'not-the-nonce');
+    await flush(w, 20);
+    ok(!JSON.parse(w.GM_getValue('settings', '{}')).uploadToken,
+       'unsigned key event ignored');
+
+    fire('Bearer whatever', NONCE);
+    await flush(w, 30);
+    ok(JSON.parse(w.GM_getValue('settings', '{}')).uploadToken === 'tok-123',
+       'signed observed key binds and stores the upload token');
+  }
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('HARNESS ERROR', e); process.exit(2); });
