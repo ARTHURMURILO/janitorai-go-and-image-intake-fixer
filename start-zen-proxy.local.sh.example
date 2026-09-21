@@ -1,0 +1,4 @@
+# Copy to start-zen-proxy.local.sh (gitignored) and put YOUR public URL here.
+# This is the base the bridge uses to build image links at upload time; it must
+# be reachable by JanitorAI (the tunnel/domain in front of port 8081).
+export IMAGE_PUBLIC_HOST="https://YOUR-TUNNEL.ngrok-free.dev"

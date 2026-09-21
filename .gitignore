@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.ruff_cache/
+
+# Node (render smoke test dev dependency)
+node_modules/
+package-lock.json
+
+# Local secrets / real hostnames — never commit
+start-zen-proxy.local.sh
+*.local.sh
+.upload-token
+
+# Third-party reference script (ZephyrThePink, GreasyFork #561922) — not ours
+zephyr_send_images.user.js
+
+# Logs & scratch
+*.log
+/tmp/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

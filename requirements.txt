@@ -1,0 +1,7 @@
+# Bridge runtime
+flask>=3.0
+requests>=2.31
+
+# Optional: downscaling/format normalization for image intake. The bridge runs
+# without it (raw bytes are forwarded), but images cost fewer tokens with it.
+Pillow>=10

@@ -1,0 +1,11 @@
+{
+  "name": "janitorai-image-intake-smoke",
+  "private": true,
+  "description": "jsdom render smoke test for janitorai-image-intake.user.js",
+  "scripts": {
+    "test:render": "node test_render_smoke.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.0"
+  }
+}
