@@ -1,37 +1,37 @@
-Hi! so i made this server + userscript to fix two problems!
+Hi! So i made this server + userscript to fix two problems!
 
-First was than JanitorAI proxy doesn't directly work with OpenCodeGO and https://hemmingway.io/ (their AI model) so i made this at first to fix those two!
+First was that the JanitorAI proxy doesn't directly work with OpenCodeGO and https://hemmingway.io/ (their AI model), so at first i made it to fix those two.
 
-Although i quickly realized than i wanted image upload to be functional in JanitorAI and managed to cook this up with Pi (GLM 5.3 Flash and Deepseek Flash v4.1)
-and it works pretty well so i decided to open source it!
+Although i quickly realized that i wanted image upload to be functional in JanitorAI too, and managed to cook this up with Pi (GLM 5.3 Flash and DeepSeek Flash v4.1).
+It works pretty well, so i decided to open source it!
 
-Won't deny AI wrote this as i just wanted something working and this isn't just plug and play as JanitorAI back end is purely text only so the server handles
-everything JanitorAI can't while trying to work without anything other than a link from JanitorAI's side.
+Won't deny AI wrote this, i just wanted something working. And this isn't plug and play, since JanitorAI's back end is purely text only. The server handles
+everything JanitorAI can't, while trying to work with nothing but a link from JanitorAI's side.
 
 Basically you just need:
 
-1 - A server (any laptop or old pc you have works although this is mostly aimed at Linux and i am unsure of Windows as i don't have any windows machine)
+1 - A server (any laptop or old pc works, although this is mostly aimed at Linux and i am unsure about Windows since i don't have a Windows machine)
 
-2 - Ngrok (free to sign up for and a good idea to use than URL link system for permanent deployament)
+2 - Ngrok (free to sign up for, and their URL system is a good stand in for a permanent deployment)
 
-After setting those two up (Clanker instructions below) it should work fine and this is compatible with desktop and mobile.
+After setting those two up (Clanker instructions below) it should work fine. Compatible with desktop and mobile.
 
-(LLM written instructions underneath) 
+(LLM written instructions underneath)
 
-# JanitorAI Image Intake — real images to your own proxy
+# JanitorAI Image Intake: real images to your own proxy
 
 Send **real images** (OpenAI-style multimodal `image_url` parts) through
 JanitorAI to whatever model your proxy routes to. Two pieces that work
 together:
 
-1. **`zen-cors-proxy.py`** — a dependency-light CORS bridge you run on your own
+1. **`zen-cors-proxy.py`**: a dependency-light CORS bridge you run on your own
    box (v2.3). It
    - converts image links inside chat messages into **real multimodal image
      parts** before forwarding upstream (the core feature), and
    - runs a **self-hosted image store** (`POST /img/upload`, `GET /img/<id>`),
-     so the attach button uploads to *your* server — no JanitorAI Media
-     Library, no moderation pipeline, no 4-link ella limit.
-2. **`janitorai-image-intake.user.js`** — a Tampermonkey companion (v1.8.0)
+     so the attach button uploads to *your* server (no JanitorAI Media
+     Library, no moderation pipeline, no 4-link ella limit).
+2. **`janitorai-image-intake.user.js`**: a Tampermonkey companion (v1.8.0)
    that adds attach buttons, drag & drop, and in-chat rendering of image
    links. Pure UX: the bridge works without it.
 
@@ -53,7 +53,7 @@ Expose port 8081 with any tunnel (`ngrok http 8081`, `cloudflared tunnel …`),
 then:
 
 1. In JanitorAI: set the **custom/proxy base URL** to `https://<your-tunnel>/v1`
-   and paste your provider key. Send one message — replies prove the bridge
+   and paste your provider key. Send one message, and replies prove the bridge
    works.
 2. Install the userscript: open `https://<your-tunnel>/intake.user.js` in the
    browser (Tampermonkey offers to install), or install
@@ -78,13 +78,13 @@ Any `![alt](url)` or bare image URL (`.png/.jpg/.webp/.gif`) in a `user` or
 rewritten into `[{"type":"text"},{"type":"image_url"}]` (OpenAI vision format)
 before the payload reaches the provider.
 
-- **Self-hosted links (default)** — 📎 uploads to your server and pastes
+- **Self-hosted links (default)**: 📎 uploads to your server and pastes
   `![name](https://<tunnel>/img/<id>.<ext>)`. The bridge re-reads its own store
   over `127.0.0.1`, so tunnel/CDN quirks never affect attachment.
 - **ella links** (`ella.janitorai.com/...`) work through the bridge as before.
 - **External links** (catbox, wallpapers.com, …) work too; the userscript also
   renders them inline in chat.
-- **System messages are never touched** — character cards and lorebooks stay
+- **System messages are never touched**: character cards and lorebooks stay
   plain text.
 
 ### The 4-image cap
@@ -112,7 +112,7 @@ stripped, so a dead URL stays visible in the message.
 
 - a **direct LAN/loopback hit** (private peer, no proxy headers), or
 - an IP that **recently completed an authenticated chat** through the tunnel
-  (upstream answered `<400`), within a 12h TTL — and only when the key used is
+  (upstream answered `<400`), within a 12h TTL, and only when the key used is
   the **owner key** pinned on first success (`OWNER_KEY_SHA256` overrides;
   `~/.config/zen-proxy/owner-key.sha256` is the pin).
 
@@ -137,7 +137,7 @@ share a binding; a phone on mobile data binds itself with one chat message.
 | `IMAGE_INTAKE_MAX_PIXELS` | `50000000` | Pillow decompression-bomb guard |
 | `IMAGE_INTAKE_HOSTS` | *(all public)* | optional host allowlist for intake |
 | `IMAGE_INTAKE_CACHE` | `128` | LRU entries of fetched images |
-| `IMAGE_PUBLIC_HOST` | *(unset)* | public base used in upload URLs — set it, or links come back relative |
+| `IMAGE_PUBLIC_HOST` | *(unset)* | public base used in upload URLs; set it, or links come back relative |
 | `IMAGE_UPLOAD_TOKEN` | auto-generated | upload auth; `off` disables (not recommended) |
 | `IMAGE_DIR` | `~/Documents/zen-images` | image storage |
 | `ZEN_CONFIG_DIR` | `~/.config/zen-proxy` | token + owner-key pin (kept out of `IMAGE_DIR` on purpose) |
@@ -146,7 +146,7 @@ share a binding; a phone on mobile data binds itself with one chat message.
 
 Restart: `./start-zen-proxy.sh` (kills the old instance first). Logs go to
 `$ZEN_DIR/zen-proxy.log` and `~/.local/state`-style rotator path
-`zen-bridge.log` — look for `[imghost]` / `[imgintake]` lines.
+`zen-bridge.log`: look for `[imghost]` / `[imgintake]` lines.
 
 ## Userscript
 
@@ -171,11 +171,11 @@ paranoid (see [`AUDIT-REPORT.md`](AUDIT-REPORT.md) for the full audit and the
 fixes that followed it):
 
 - `/img/<name>` serves **only** files the bridge itself created (strict name
-  pattern) — `/img/.upload-token` (a real past exposure) is impossible now.
+  pattern), so `/img/.upload-token` (a real past exposure) is impossible now.
 - Secrets live in `ZEN_CONFIG_DIR`, never in the publicly served image dir.
 - `/img/*` sends **no CORS headers**: a random website cannot read the token
   endpoint out of your browser.
-- Binding requires the owner's key (TOFU-pinned) — having *any* valid
+- Binding requires the owner's key (TOFU-pinned), so having *any* valid
   JanitorAI key is not enough to collect your upload token.
 - Intake fetches are SSRF-gated: loopback, link-local (cloud metadata), and
   private ranges are refused, redirects are re-validated hop by hop, and the
@@ -192,10 +192,10 @@ fixes that followed it):
 
 - Vision happens **at the model**: the routed model must accept OpenAI
   `image_url` parts.
-- Images ride in every request for as long as they stay in history — tune
+- Images ride in every request for as long as they stay in history, so tune
   `IMAGE_INTAKE_MAX_IMAGES` / `IMAGE_INTAKE_LAST_N` to control tokens.
 - The chat renderer is cosmetic: if JanitorAI changes its DOM, previews may
-  stop — attachments (the bridge) are unaffected.
+  stop, though attachments (the bridge) are unaffected.
 
 ## Tests
 
@@ -210,9 +210,9 @@ npm i && npm run test:render     # userscript renderer/drag-drop (jsdom)
 ```
 
 All Python suites are hermetic (they use temp dirs, not your real config) and
-the live shell tests take `BASE=`/`ZEN_DIR=` overrides — nothing is hardcoded
+the live shell tests take `BASE=`/`ZEN_DIR=` overrides, so nothing is hardcoded
 to a specific machine.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
