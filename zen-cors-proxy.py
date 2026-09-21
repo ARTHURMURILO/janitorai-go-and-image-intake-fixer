@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, Response, request as flask_req
 
-VERSION = "2.3"
+VERSION = "2.4"
 PORT = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 8081))
 PROXY_UA = os.environ.get("PROXY_USER_AGENT", "janitorai-bridge/" + VERSION)
 SESSION_FILE = os.environ.get(
@@ -716,7 +716,38 @@ def bearer_token(auth_value):
     return v
 
 
-def build_upstream_headers(provider_key):
+def _validated_forward_origin():
+    """Origin the userscript asks us to relay to (X-Zen-Forward-Origin).
+
+    Only honored for the owner's key, and only for public https targets: the
+    tunnel is on the internet, so this must never become a general relay or an
+    SSRF trampoline. Everyone else's header is ignored and normal routing
+    applies, which is exactly the pre-forward behaviour.
+    """
+    raw = (flask_req.headers.get("X-Zen-Forward-Origin") or "").strip()
+    if not raw:
+        return None
+    if "," in raw:  # duplicated header (or a comma): refuse to guess
+        return None
+    if not key_is_owner(bearer_token(flask_req.headers.get("Authorization", ""))):
+        log.info("[forward] ignored (key is not the owner key) from %s", _client_ip())
+        return None
+    try:
+        parts = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not parts.hostname:
+        log.warning("[forward] rejected (not https): %s", raw[:80])
+        return None
+    if parts.username or parts.password:
+        return None
+    if not _is_fetchable_public_url(raw):
+        log.warning("[forward] blocked non-public target: %s", raw[:80])
+        return None
+    return raw.rstrip("/")
+
+
+def build_upstream_headers(provider_key, neutral=False):
     incoming = dict(flask_req.headers)
     auth_value = incoming.get("Authorization", "")
     body = flask_req.get_data()
@@ -732,6 +763,9 @@ def build_upstream_headers(provider_key):
         if lk in ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
                   "x-real-ip", "forwarded"):
             continue
+        # Bridge-internal routing headers must not travel downstream.
+        if lk in ("x-zen-forward-origin", "x-upstream", "x-zen-upstream"):
+            continue
         # Forward: auth, content negotiation, all x-*, anthropic/openai namespaced headers.
         if lk in ("authorization", "content-type", "accept",
                   "accept-language", "accept-encoding") or \
@@ -740,12 +774,13 @@ def build_upstream_headers(provider_key):
 
     # x-opencode-session is OpenCode-specific. Sending it to another provider
     # leaks a session identifier and can trip strict request validation.
-    if UPSTREAMS[provider_key]["session_header"]:
+    # neutral=True means "relay to someone else's API": no session header at all.
+    if not neutral and UPSTREAMS[provider_key]["session_header"]:
         out["x-opencode-session"] = session_id
 
     # User-Agent: override generic SDK names, keep real custom ones but tag them.
     incoming_ua = incoming.get("User-Agent", "")
-    tag = UPSTREAMS[provider_key]["ua_tag"]
+    tag = PROXY_UA if neutral else UPSTREAMS[provider_key]["ua_tag"]
     if not incoming_ua or any(g in incoming_ua.lower() for g in GENERIC_UA_SUBSTRINGS):
         out["User-Agent"] = tag
     else:
@@ -1243,18 +1278,34 @@ def proxy_passthrough(path=""):
     t0 = time.time()
     body = flask_req.get_data()
     body, _n_images = maybe_transform_body(body, flask_req.path)
-    provider_key, suffix = resolve_route(path, flask_req.headers.get("Authorization", ""),
-                                         body, flask_req.headers, flask_req.method)
-    if suffix is None:
-        log.info("404 %s %s", flask_req.method, flask_req.path)
-        return json_resp(
-            {"error": {"message": f"Not found: {flask_req.path}. Use /v1/... ",
-                       "type": "invalid_request_error"}}, 404)
 
-    cfg = UPSTREAMS[provider_key]
-    url = cfg["base"] + suffix
+    # Forward mode (userscript "Route other APIs through my bridge"): the
+    # owner's key may ask us to relay this exact request to the API origin
+    # JanitorAI was originally configured with. Everything else, including
+    # non-owner keys, follows the normal route table.
+    fwd_origin = _validated_forward_origin()
+    neutral = False
+    if fwd_origin:
+        provider_key = DEFAULT_PROVIDER
+        cfg = UPSTREAMS[provider_key]
+        q = flask_req.query_string.decode("utf-8", "replace") if flask_req.query_string else ""
+        url = fwd_origin + flask_req.path + (("?" + q) if q else "")
+        suffix = flask_req.path
+        neutral = True
+        log.info("[forward] %s %s -> %s", flask_req.method, flask_req.path, fwd_origin)
+    else:
+        provider_key, suffix = resolve_route(path, flask_req.headers.get("Authorization", ""),
+                                             body, flask_req.headers, flask_req.method)
+        if suffix is None:
+            log.info("404 %s %s", flask_req.method, flask_req.path)
+            return json_resp(
+                {"error": {"message": f"Not found: {flask_req.path}. Use /v1/... ",
+                           "type": "invalid_request_error"}}, 404)
+
+        cfg = UPSTREAMS[provider_key]
+        url = cfg["base"] + suffix
     params = flask_req.args
-    headers, session_id, session_source = build_upstream_headers(provider_key)
+    headers, session_id, session_source = build_upstream_headers(provider_key, neutral=neutral)
 
     # Stream if client asked for it or expects SSE.
     wants_stream = False
@@ -1278,8 +1329,9 @@ def proxy_passthrough(path=""):
                                   data=body, params=params, stream=True,
                                   timeout=(10, 300))
             # Self-heal: if we somehow still missed the session, retry once.
-            # OpenCode-only — no other provider has this requirement.
-            if up.status_code == 400 and cfg["session_header"]:
+            # OpenCode-only — no other provider has this requirement (and
+            # forwarded requests are someone else's API: no session header).
+            if not neutral and up.status_code == 400 and cfg["session_header"]:
                 try:
                     err = up.json()
                     if "MissingSessionID" in json.dumps(err):
@@ -1315,7 +1367,7 @@ def proxy_passthrough(path=""):
         else:
             up = requests.request(flask_req.method, url, headers=headers,
                                   data=body, params=params, timeout=(10, 120))
-            if up.status_code == 400 and cfg["session_header"]:
+            if not neutral and up.status_code == 400 and cfg["session_header"]:
                 try:
                     if "MissingSessionID" in up.text:
                         log.warning("Upstream still reports MissingSessionID, "

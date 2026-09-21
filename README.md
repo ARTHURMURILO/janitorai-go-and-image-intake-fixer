@@ -66,10 +66,43 @@ then:
 ### Why the bridge learns itself
 
 No manual configuration: the userscript watches JanitorAI's own outgoing chat
-request for the proxy host, verifies that evidence with a per-page nonce, and
-then fetches the upload token from `/img/token`. Rotating the token later is
-just `rm ~/.config/zen-proxy/upload-token` + restart; every device re-fetches
-on its next attach.
+request for the proxy host and accepts the evidence only when it is signed
+with a per-page nonce. A candidate URL must then pass two more checks before
+it is adopted:
+
+1. the host looks like **your** tunnel or LAN (ngrok, tailscale `ts.net`, a
+   private IP; a random ngrok or an unrelated API is rejected on sight), and
+2. it **proves it is the bridge** by answering `/healthz` with the bridge
+   shape, for example `{"ok": true, "v": "2.4"}`.
+
+Once a good URL is learned it is **pinned**: nothing can silently repoint it
+again, not a page script, not another ngrok, not localStorage. On every boot
+the learned URL is re-checked, and one that answers like something else (the
+"learned the wrong server" case) is forgotten automatically so learning can
+start over. You can also forget it yourself: clear the URL field in Advanced
+and Save.
+
+Fetching the upload token then works with zero setup: `/img/token` answers
+because your device recently chatted through the tunnel with your key.
+Rotating the token later is just `rm ~/.config/zen-proxy/upload-token` +
+restart; every device re-fetches on its next attach.
+
+### Use any API: forward mode
+
+Point JanitorAI at whatever API you like (Xiaomi's `api.xiaomimimo.com`,
+anything else) and tick **Route other APIs through my bridge** in the ⚙
+sheet. Then:
+
+- JanitorAI keeps its own proxy URL exactly as you set it (no swapping to
+  ngrok, no losing your model list),
+- the extension quietly reroutes those calls through your bridge, tagging the
+  original origin, and
+- the bridge relays them there, so you still get image intake, self hosting
+  and the 4 image cap for **any** provider.
+
+Forwarding only happens with your owner key, only over https, and only to
+public hosts; anyone else's tagged request is ignored and follows normal
+routing. Turn the toggle off and everything goes direct again.
 
 ## How sending works
 
@@ -160,6 +193,9 @@ Restart: `./start-zen-proxy.sh` (kills the old instance first). Logs go to
   and a rotated/removed image never leaves a ghost element behind.
 - Chats only: the renderer refuses to run on profiles, discovery, or the chat
   list.
+- **Forward mode**: the opt-in "Route other APIs through my bridge" toggle
+  (see above) keeps image intake working when JanitorAI points at an API that
+  is not your tunnel.
 - Settings live under **Advanced** (manual base URL, write-only token field,
   connection test, verbose log). Mobile-safe: 44px targets, safe-area insets,
   bottom sheet.
@@ -185,6 +221,11 @@ fixes that followed it):
   localStorage learning is anchored to config-looking keys and https only.
 - Preview fetches use `anonymous: true` (no cookies), enforce an `image/*`
   content type, a 20 MB cap, and never touch private-network hosts.
+- The settings fields are invisible to password managers (no `type=password`,
+  no credential-looking form), so Firefox/Chrome never offer to save your
+  bridge URL and token as a janitorai.com login.
+- Auto-learn only trusts nonce-signed events, tunnel/LAN hostnames, and a
+  passing `/healthz` probe; a learned URL is pinned so nothing can repoint it.
 - `@connect *` is required because the bridge host is user-specific; the only
   privileged calls are the health/token/upload calls to the bridge you learned.
 

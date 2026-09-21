@@ -32,12 +32,13 @@ function makeDom(bodyHtml, opts = {}) {
        ${editor}
        <div data-testid="virtuoso-item-list">${bodyHtml}</div>
      </body></html>`,
-    { url, pretendToBeVisual: true, runScripts: 'outside-only' }
+    { url, pretendToBeVisual: true, runScripts: 'dangerously' }
   );
   const w = dom.window;
   // GM stubs
   const store = {};
-  if (opts.bridge) store.settings = JSON.stringify({ bridgeBase: 'https://bridge.example', uploadToken: '' });
+  if (opts.settings) store.settings = JSON.stringify(opts.settings);
+  else if (opts.bridge) store.settings = JSON.stringify({ bridgeBase: 'https://bridge.example', uploadToken: '' });
   w.GM_getValue = (k, d) => (k in store ? store[k] : d);
   w.GM_setValue = (k, v) => { store[k] = v; };
   w.GM_info = { script: { version: 'test' } };
@@ -46,7 +47,11 @@ function makeDom(bodyHtml, opts = {}) {
   w.GM_xmlhttpRequest = (req) => {
     fetched.push(req.url);
     setTimeout(() => {
-      if (/\/img\/token/.test(req.url)) {
+      if (/\/healthz/.test(req.url)) {
+        const body = opts.healthzBody !== undefined ? opts.healthzBody : { ok: true, v: '2.3' };
+        req.onload({ status: 200, responseText: JSON.stringify(body),
+                     responseHeaders: 'content-type: application/json' });
+      } else if (/\/img\/token/.test(req.url)) {
         req.onload({ status: 200, responseText: JSON.stringify({ token: 'tok-123' }),
                      responseHeaders: 'content-type: application/json' });
       } else if (/\/img\/upload/.test(req.url)) {
@@ -79,6 +84,12 @@ function makeDom(bodyHtml, opts = {}) {
     },
   });
   Object.defineProperty(w.HTMLImageElement.prototype, 'naturalWidth', { get() { return this.__natural || 0; } });
+
+  try {
+    // Deterministic nonce ('ab' x16) so tests can sign bridge events.
+    w.crypto.getRandomValues = (arr) => { arr.fill(0xab); return arr; };
+  } catch (e) { /* crypto not overridable: nonce tests will fail loudly */ }
+  if (opts.fetchStub) w.fetch = (u, c) => ({ __u: u, __c: c });
 
   w.eval(SRC);
   return { dom, w, fetched, setRespond: (fn) => { respond = fn; } };
@@ -265,6 +276,94 @@ const anchors = (w) => [...w.document.querySelectorAll('[data-index] a[href]')]
     await flush(w, 20);
     ok(!ev.defaultPrevented, 'ignored outside chat pages');
     ok(!w.document.querySelector('.ji-drop'), 'no overlay outside chat pages');
+  }
+
+  console.log('\n13) settings sheet never looks like a login form (password managers)');
+  {
+    const { w } = makeDom(`<div data-index="0"><div>hi</div></div>`);
+    await flush(w);
+    const tok = w.document.querySelector('[data-role="token"]');
+    const base = w.document.querySelector('[data-role="base"]');
+    ok(tok && tok.type !== 'password', 'token field is not type=password');
+    ok(tok && tok.getAttribute('data-lpignore') === 'true', 'token marked lpignore');
+    ok(tok && tok.getAttribute('data-1p-ignore') === '1', 'token marked 1password ignore');
+    ok(base && base.getAttribute('data-form-type') === 'other', 'base marked non-credential');
+    ok(tok && tok.value === '', 'token never pre-filled into the DOM');
+  }
+
+  console.log('\n14) learn trust: signed events only, trusted hosts only, verified, then pinned');
+  {
+    const { w } = makeDom(`<div data-index="0"><div>hi</div></div>`, {
+      healthzBody: { ok: true, v: '2.3' },
+    });
+    await flush(w);
+    const NONCE = 'ab'.repeat(16);
+    const fire = (url, nonce) => w.dispatchEvent(
+      new w.CustomEvent('ji-bridge-url', { detail: { url, nonce } }));
+    const settings = () => JSON.parse(w.GM_getValue('settings', '{}'));
+
+    fire('https://forged.ngrok-free.dev', 'not-the-right-nonce');
+    await flush(w, 20);
+    ok(!settings().bridgeBase, 'unsigned event ignored');
+
+    fire('https://api.xiaomimimo.com', NONCE);
+    await flush(w, 20);
+    ok(!settings().bridgeBase, 'signed but untrusted host never learned');
+
+    fire('https://someoneelse.ngrok-free.dev', NONCE);
+    await flush(w, 30);
+    ok(settings().bridgeBase === 'https://someoneelse.ngrok-free.dev',
+       'trusted host with a real /healthz learned');
+    ok(settings().bridgePinned === true, 'learned bridge is pinned');
+
+    fire('https://otherbox.ngrok-free.dev', NONCE);
+    await flush(w, 30);
+    ok(settings().bridgeBase === 'https://someoneelse.ngrok-free.dev',
+       'pinned: a later learn attempt is ignored');
+  }
+
+  console.log('\n15) boot self heal: a learned base that answers with something else is forgotten');
+  {
+    const { w } = makeDom(`<div data-index="0"><div>hi</div></div>`, {
+      settings: { bridgeBase: 'https://looks-real.ngrok-free.dev' },
+      healthzBody: { hello: 'not-a-bridge' },
+    });
+    await flush(w, 40);
+    const st = JSON.parse(w.GM_getValue('settings', '{}'));
+    ok(!st.bridgeBase, 'foreign base forgotten on boot');
+    ok(!st.bridgePinned, 'and not pinned');
+  }
+
+  console.log('\n16) forward mode on: chat calls reroute through the bridge with the true origin tagged');
+  {
+    const { w } = makeDom(`<div data-index="0"><div>hi</div></div>`, {
+      settings: { bridgeBase: 'https://mybridge.example', bridgeManual: true, forwardMode: true },
+      fetchStub: true,
+    });
+    await flush(w);
+    const r = await w.fetch('https://api.xiaomimimo.com/v1/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    ok(r.__u === 'https://mybridge.example/v1/chat/completions',
+       'rewritten to the pinned bridge origin');
+    const h = r.__c && r.__c.headers;
+    const fwd = (h && typeof h.get === 'function')
+      ? h.get('X-Zen-Forward-Origin') : (h && h['X-Zen-Forward-Origin']);
+    ok(fwd === 'https://api.xiaomimimo.com', 'original origin tagged for the bridge');
+    ok(r.__c.method === 'POST' && r.__c.body === '{}', 'method and body untouched');
+
+    const r2 = await w.fetch('https://janitorai.com/api/whatever', { method: 'POST' });
+    ok(r2.__u === 'https://janitorai.com/api/whatever', 'JanitorAI itself is never touched');
+  }
+
+  console.log('\n17) forward mode off: traffic goes exactly where JanitorAI sent it');
+  {
+    const { w } = makeDom(`<div data-index="0"><div>hi</div></div>`, {
+      settings: { bridgeBase: 'https://mybridge.example', bridgeManual: true, forwardMode: false },
+      fetchStub: true,
+    });
+    await flush(w);
+    const r = await w.fetch('https://api.xiaomimimo.com/v1/chat/completions', { method: 'POST' });
+    ok(r.__u === 'https://api.xiaomimimo.com/v1/chat/completions', 'no rewrite when the toggle is off');
   }
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

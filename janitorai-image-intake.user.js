@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI: Real Image Intake (bridge companion)
 // @namespace    https://github.com/ARTHURMURILO/janitorai-go-and-image-intake-fixer
-// @version      1.8.0
+// @version      1.9.0
 // @description  One-click image attach that uploads to YOUR server's image store (zen-bridge /img/upload), renders external image links in chat, and pairs with the bridge's real image intake. No JanitorAI Media Library needed.
 // @author       Arthur + Pi
 // @license      MIT
@@ -56,6 +56,8 @@
     debugLog: false,
     bridgeBase: '',         // learned from JanitorAI's own chat requests
     bridgeManual: false,    // true when the user typed a base by hand
+    bridgePinned: false,    // a verified bridge: auto-learning stops for good
+    forwardMode: false,     // opt-in: reroute other APIs through the bridge
     uploadToken: '',        // auto-fetched from the bridge (owner-bound)
   };
   let settings = Object.assign({}, DEFAULTS);
@@ -627,53 +629,139 @@
     }
   }
 
-  // US-1: the sniffer's events are nonce-signed. The nonce is created here
-  // (sandbox side) and captured in the injected script's closure, so a page
-  // script can dispatch a same-named CustomEvent but cannot produce a valid
-  // nonce — a forged "bridge URL" can no longer repoint the bridge at a host
-  // that would then receive the upload token on the next attach.
   let sniffNonce = '';
-  function injectBridgeSniffer() {
+  let hookGen = 0;
+
+  // (Re)injects the page hooks. Each generation carries a fresh nonce, the
+  // current bridge origin and the forward flag, so stale wrappers see a gen
+  // mismatch and pass traffic through untouched. Called at boot and whenever
+  // the bridge/forward settings change.
+  function reapplyPageHooks() {
+    if (!document.documentElement) return;
+    hookGen += 1;
     sniffNonce = randomNonce();
-    dlog('bridge sniffer nonce issued');
+    dlog('page hooks gen', hookGen, 'forward=', settings.forwardMode);
+    const bridge = bridgeBase();
     const src = document.createElement('script');
-    src.textContent = `(${function (NONCE) {
+    src.textContent = `(${function (NONCE, GEN, BRIDGE, FORWARD) {
       const EVT = 'ji-bridge-url';
+      const CHAT_RE = /\/(v1(?:\/|$)|chat\/completions|hemmingway|zen)/;
+      function pageish(url) {
+        try {
+          const u = new URL(url, location.href);
+          if (u.origin === location.origin) return true;
+          if (/(^|\.)janitorai\.com$/.test(u.hostname)) return true;
+          if (/(^|\.)supabase\.co$/.test(u.hostname)) return true;
+        } catch (e) { return true; }
+        return false;
+      }
       function consider(url, method) {
         try {
-          const u = new URL(url, location.origin);
-          if (u.origin === location.origin) return;
-          if (/(^|\.)janitorai\.com$/.test(u.hostname)) return;
-          if (/(^|\.)supabase\.co$/.test(u.hostname)) return; // auth traffic
+          const u = new URL(url, location.href);
+          if (pageish(u.href)) return;
           if (String(method || '').toUpperCase() === 'GET') return;
-          // Chat-completions-ish endpoints only (their own API paths).
-          if (!/\/(v1(?:\/|$)|chat\/completions|hemmingway|zen)/.test(u.pathname)) return;
+          if (!CHAT_RE.test(u.pathname)) return;
           window.dispatchEvent(new CustomEvent(EVT, { detail: { url: u.origin, nonce: NONCE } }));
         } catch (e) { /* not a usable URL */ }
       }
+      // Forward mode: swap ONLY the origin of chat-ish calls to the pinned
+      // bridge and tag the true target, so the bridge can relay to the API
+      // JanitorAI was actually configured with. Path and query stay intact.
+      function forwardPlan(url) {
+        if (!FORWARD || !BRIDGE) return null;
+        try {
+          const u = new URL(url, location.href);
+          if (u.origin === BRIDGE || pageish(u.href)) return null;
+          if (!CHAT_RE.test(u.pathname)) return null;
+          return { target: BRIDGE + u.pathname + u.search, origin: u.origin };
+        } catch (e) { return null; }
+      }
       const origFetch = window.fetch;
       window.fetch = async function (...args) {
+        if (window.__ji_gen !== GEN) return origFetch.apply(this, args);
         try {
           const [resource, config] = args;
           const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
           const method = (config && config.method) || (resource && resource.method) || 'GET';
           consider(url, method);
+          if (typeof resource === 'string') {
+            const plan = forwardPlan(resource);
+            if (plan) {
+              const cfg = Object.assign({}, config || {});
+              try {
+                const hdrs = new Headers(cfg.headers || undefined);
+                if (!hdrs.has('X-Zen-Forward-Origin')) hdrs.set('X-Zen-Forward-Origin', plan.origin);
+                cfg.headers = hdrs;
+              } catch (e) {
+                cfg.headers = Object.assign({}, (config && config.headers) || {},
+                  { 'X-Zen-Forward-Origin': plan.origin });
+              }
+              return origFetch.call(this, plan.target, cfg);
+            }
+          }
         } catch (e) { /* never break the page's fetch */ }
         return origFetch.apply(this, args);
       };
       const XHR = XMLHttpRequest.prototype;
       const origOpen = XHR.open;
       XHR.open = function (method, url) {
-        try { consider(url, method); } catch (e) { /* same */ }
+        if (window.__ji_gen === GEN) {
+          try { consider(url, method); } catch (e) { /* same */ }
+          try {
+            const plan = forwardPlan(String(url));
+            if (plan) {
+              const rest = Array.prototype.slice.call(arguments, 2);
+              const ret = origOpen.call(this, method, plan.target, ...rest);
+              try { this.setRequestHeader('X-Zen-Forward-Origin', plan.origin); } catch (e2) {}
+              return ret;
+            }
+          } catch (e) { /* fall through */ }
+        }
         return origOpen.apply(this, arguments);
       };
-    }.toString()})(${JSON.stringify(sniffNonce)});`;
+      window.__ji_gen = GEN;
+    }.toString()})(${JSON.stringify(sniffNonce)}, ${hookGen}, ${JSON.stringify(bridge)}, ${settings.forwardMode ? 'true' : 'false'});`;
     (document.head || document.documentElement).appendChild(src);
     src.remove();
   }
 
-  function learnBridgeFromUrl(origin, source) {
+  // Only hosts that look like YOUR tunnel or LAN are candidates for
+  // auto-learn. This is what stops an unrelated ngrok (or a random API)
+  // from ever being adopted as the bridge.
+  function trustedBridgeHost(hostname) {
+    const h = String(hostname || '').toLowerCase();
+    if (!h) return false;
+    if (h === 'localhost' || h === '127.0.0.1' || h === '[::1]') return true;
+    if (/(^|\.)ngrok-free\.dev$/.test(h) || /(^|\.)ngrok-free\.app$/.test(h) ||
+        /(^|\.)ngrok\.app$/.test(h) || /(^|\.)ngrok\.io$/.test(h)) return true;
+    if (/(^|\.)ts\.net$/.test(h)) return true;  // tailscale MagicDNS
+    if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h)) return true; // tailscale IPs
+    if (/^(10\.|192\.168\.)/.test(h)) return true;                      // LAN
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;               // LAN
+    return false;
+  }
+
+  // 'ok' = answers our /healthz shape, 'foreign' = answers with something
+  // else (an unrelated service), 'unreachable' = no answer at all.
+  async function verifyBridge(base) {
+    try {
+      const r = await gmFetch('GET', String(base).replace(/\/+$/, '') + '/healthz');
+      if (looksLikeNgrokInterstitial(r.text)) return 'unreachable'; // not proven yet
+      if (!r.ok) return 'foreign';  // reachable, but not our bridge
+      try {
+        const d = JSON.parse(r.text || '');
+        if (d && d.ok === true && typeof d.v === 'string') return 'ok';
+        return 'foreign';
+      } catch (e) { return 'foreign'; }
+    } catch (e) { return 'unreachable'; }
+  }
+
+  async function learnBridgeFromUrl(origin, source) {
     if (settings.bridgeManual) return false;
+    if (settings.bridgePinned && settings.bridgeBase) {
+      dlog('bridge pinned, ignoring learn from', source || '?');
+      return false;
+    }
     if (!origin || origin === settings.bridgeBase) return !!origin;
     let u;
     try { u = new URL(origin); } catch (e) { return false; }
@@ -683,21 +771,49 @@
       (u.protocol === 'http:' && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname));
     if (!okScheme) return false;
     if (/(^|\.)janitorai\.com$/.test(u.hostname)) return false;
-    const base = u.origin;
-    const changed = !!settings.bridgeBase;
-    settings.bridgeBase = base;
-    saveSettings();
-    dlog('bridge base learned from ' + (source || '?') + ':', base);
-    if (changed) {
-      // A silent repoint decides where uploads (and their token) go — say so.
-      toast('Bridge URL updated to ' + u.hostname, 'warn');
+    if (!trustedBridgeHost(u.hostname)) {
+      dlog('learn rejected (not a trusted bridge host):', u.hostname);
+      return false;
     }
+    const verdict = await verifyBridge(u.origin);
+    if (verdict !== 'ok') {
+      dlog('learn rejected (' + verdict + '):', u.origin);
+      return false;
+    }
+    const base = u.origin;
+    settings.bridgeBase = base;
+    settings.bridgePinned = true;   // good path found: never auto-learn again
+    saveSettings();
+    dlog('bridge base learned and pinned from ' + (source || '?') + ':', base);
+    reapplyPageHooks();
     refreshSheetStatus();
     ensureUploadToken().then(() => {
       refreshSheetStatus();
-      toast('Bridge learned ✓ — images ready');
+      toast('Bridge learned and pinned ✓ — images ready');
     });
     return true;
+  }
+
+  // One-time self heal: if a previously learned base turns out not to be a
+  // bridge (the wrong-learn bug), forget it so learning can start over.
+  // Unreachable is left alone: your bridge may just be offline right now.
+  function healLearnedBridge() {
+    if (!settings.bridgeBase || settings.bridgeManual) return;
+    verifyBridge(settings.bridgeBase).then((v) => {
+      if (v === 'ok') {
+        if (!settings.bridgePinned) { settings.bridgePinned = true; saveSettings(); }
+        refreshSheetStatus();
+        reapplyPageHooks();
+      } else if (v === 'foreign') {
+        dlog('forgetting non-bridge base:', settings.bridgeBase);
+        settings.bridgeBase = '';
+        settings.bridgePinned = false;
+        saveSettings();
+        refreshSheetStatus();
+        toast('Learned URL was not your bridge, forgotten', 'warn');
+        scanLocalStorageForBridge();
+      }
+    });
   }
 
   function scanLocalStorageForBridge() {
@@ -941,13 +1057,14 @@
         <div class="${CSS_PREFIX}sheet-title">Image intake</div>
         <div class="${CSS_PREFIX}sheet-status" data-role="status"></div>
         <label class="${CSS_PREFIX}row"><input type="checkbox" data-role="debug"> Verbose console log</label>
+        <label class="${CSS_PREFIX}row"><input type="checkbox" data-role="forward"> Route other APIs through my bridge</label>
         <details class="${CSS_PREFIX}adv">
           <summary>Advanced</summary>
           <label class="${CSS_PREFIX}field">Bridge base URL (learned automatically)
-            <input type="url" data-role="base" placeholder="https://…ngrok-free.dev" autocomplete="off" spellcheck="false">
+            <input type="url" data-role="base" placeholder="https://…ngrok-free.dev" autocomplete="off" spellcheck="false" name="ji-bridge-url-field" data-form-type="other" data-1p-ignore="1" data-lpignore="true" data-bwignore="true">
           </label>
           <label class="${CSS_PREFIX}field">Upload token (auto-fetched)
-            <input type="password" data-role="token" placeholder="leave blank to keep the stored one" autocomplete="off" spellcheck="false">
+            <input type="text" data-role="token" placeholder="leave blank to keep the stored one" autocomplete="off" spellcheck="false" name="ji-intake-token" data-form-type="other" data-1p-ignore="1" data-lpignore="true" data-bwignore="true">
           </label>
           <div class="${CSS_PREFIX}btn-row">
             <button type="button" class="${CSS_PREFIX}btn" data-role="save">Save</button>
@@ -955,10 +1072,14 @@
           </div>
         </details>
         <button type="button" class="${CSS_PREFIX}btn ghost" data-role="close">Close</button>
-        <p class="${CSS_PREFIX}hint">Zero setup: send one chat message — I learn the
-        bridge URL from it and fetch the upload token (your devices are
+        <p class="${CSS_PREFIX}hint">Zero setup: send one chat message and I learn the
+        bridge URL from it, verify it is really your bridge, pin it so nothing
+        else can repoint it, and fetch the upload token (your devices are
         recognized automatically). 📎 then uploads to your server and the
-        model receives the real pixels.</p>
+        model receives the real pixels. Advanced lets you clear the URL to let
+        it learn again. "Route other APIs" makes JanitorAI keep using any API
+        you point it at (Xiaomi, anything) while every call is quietly passed
+        through your bridge for image intake.</p>
       </div>`;
     document.body.appendChild(sheetEl);
 
@@ -973,16 +1094,27 @@
       const nb = sheetEl.querySelector('[data-role="base"]').value.trim();
       settings.bridgeBase = nb;
       settings.bridgeManual = !!nb;
+      if (!nb) settings.bridgePinned = false;  // cleared: learning may run again
       const typed = sheetEl.querySelector('[data-role="token"]').value.trim();
       if (typed) settings.uploadToken = typed;   // blank keeps the stored one
       saveSettings();
       toast('Saved ✓');
       testBridge();
       ensureUploadToken();
+      reapplyPageHooks();
     });
     sheetEl.querySelector('[data-role="test"]').addEventListener('click', testBridge);
     sheetEl.querySelector('[data-role="debug"]').checked = settings.debugLog;
     sheetEl.querySelector('[data-role="debug"]').addEventListener('change', (e) => { settings.debugLog = e.target.checked; saveSettings(); });
+    sheetEl.querySelector('[data-role="forward"]').checked = !!settings.forwardMode;
+    sheetEl.querySelector('[data-role="forward"]').addEventListener('change', (e) => {
+      settings.forwardMode = e.target.checked;
+      saveSettings();
+      reapplyPageHooks();
+      toast(e.target.checked
+        ? 'Forwarding on: chat calls now pass through your bridge'
+        : 'Forwarding off: JanitorAI talks to its API directly');
+    });
     refreshSheetStatus();
   }
 
@@ -1202,7 +1334,8 @@
   // ------------------------------------------------------------------
   function boot() {
     injectCss();
-    injectBridgeSniffer();
+    reapplyPageHooks();
+    healLearnedBridge();
     scanLocalStorageForBridge();
     buildSheet();
     ensureCluster();

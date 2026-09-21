@@ -1,5 +1,20 @@
 # Changelog
 
+## Bridge 2.4 and userscript 1.9.0
+- **Forward mode** (opt in): point JanitorAI at any API you like and tick
+  "Route other APIs through my bridge"; calls are rerouted through your
+  bridge and relayed to the origin you configured, with image intake intact.
+  Owner key only, https only, public hosts only.
+- **Learn trust**: auto-learn now requires a tunnel/LAN hostname, a signed
+  event, and a passing `/healthz` proof that the host really is the bridge.
+  A learned URL is pinned (clear it in Advanced to re-learn); on boot, a base
+  that answers like something else is forgotten automatically.
+- **Password manager fix**: the settings fields no longer look like a login
+  form, so browsers stop offering to save your bridge URL and token as
+  janitorai.com credentials (which then autofilled on the home screen).
+  Delete any previously saved janitorai.com entry in about:logins to finish
+  cleaning up.
+
 ## Bridge 2.3 — 2026-09-21
 Security release (see AUDIT-REPORT.md):
 - **Fixed a real exposure:** `/img/.upload-token` was publicly readable; the

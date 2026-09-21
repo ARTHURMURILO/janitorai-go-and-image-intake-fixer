@@ -147,5 +147,55 @@ r = client.post("/img/upload", json={"name": "x.png", "data": "aGk="},
                 headers={"X-Upload-Token": "wrong"})
 check("M2 wrong upload token rejected", r.status_code == 401, r.status_code)
 
+# --- Forward mode: owner key only, public https targets only -----------------
+_fwd_seen = {}
+
+class _FakeUpstream:
+    status_code = 200
+    headers = {"Content-Type": "application/json"}
+    text = '{"choices": []}'
+    content = b'{"choices": []}'
+    def json(self):
+        return {"choices": []}
+    def iter_content(self, n=None):
+        yield self.content
+
+def _capturing_request(method, url, **kw):
+    _fwd_seen["url"] = url
+    _fwd_seen["headers"] = kw.get("headers") or {}
+    return _FakeUpstream()
+
+m.requests.request = _capturing_request
+_fwd_body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+
+client.post("/v1/chat/completions", json=_fwd_body,
+            headers={"Authorization": "Bearer owner-key",
+                     "X-Zen-Forward-Origin": "https://example.com"})
+check("FWD owner key relays to the tagged origin",
+      str(_fwd_seen.get("url", "")).startswith("https://example.com/v1/chat/completions"),
+      _fwd_seen.get("url"))
+check("FWD relay keeps the original path",
+      str(_fwd_seen.get("url", "")).endswith("/v1/chat/completions"), _fwd_seen.get("url"))
+check("FWD header never travels downstream",
+      not any(k.lower() == "x-zen-forward-origin" for k in _fwd_seen.get("headers", {})),
+      _fwd_seen.get("headers"))
+check("FWD neutral mode adds no opencode session header",
+      not any(k.lower() == "x-opencode-session" for k in _fwd_seen.get("headers", {})),
+      _fwd_seen.get("headers"))
+
+client.post("/v1/chat/completions", json=_fwd_body,
+            headers={"Authorization": "Bearer attacker-key",
+                     "X-Zen-Forward-Origin": "https://api.evil.example"})
+check("FWD non-owner key is ignored (normal routing)",
+      not str(_fwd_seen.get("url", "")).startswith("https://api.evil.example"),
+      _fwd_seen.get("url"))
+
+client.post("/v1/chat/completions", json=_fwd_body,
+            headers={"Authorization": "Bearer owner-key",
+                     "X-Zen-Forward-Origin": "http://169.254.169.254/latest"})
+check("FWD http / link-local target refused",
+      not str(_fwd_seen.get("url", "")).startswith("http://169.254.169.254"),
+      _fwd_seen.get("url"))
+
 print("\nSECURITY_TESTS_" + ("OK" if not _fail else "FAILED: " + ", ".join(_fail)))
 raise SystemExit(1 if _fail else 0)
