@@ -1,3 +1,22 @@
+Hi! so i made this server + userscript to fix two problems!
+
+First was than JanitorAI proxy doesn't directly work with OpenCodeGO and https://hemmingway.io/ (their AI model) so i made this at first to fix those two!
+
+Although i quickly realized than i wanted image upload to be functional in JanitorAI and managed to cook this up with Pi (GLM 5.3 Flash and Deepseek Flash v4.1)
+and it works pretty well so i decided to open source it!
+
+Won't deny AI wrote this as i just wanted something working and this isn't just plug and play as JanitorAI back end is purely text only so the server handles
+everything JanitorAI can't while trying to work without anything other than a link from JanitorAI's side.
+
+Basically you just need:
+
+1 - A server (any laptop or old pc you have works although this is mostly aimed at Linux and i am unsure of Windows as i don't have any windows machine)
+2 - Ngrok (free to sign up for and a good idea to use than URL link system for permanent deployament)
+
+After setting those two up (Clanker instructions below) it should work fine and this is compatible with desktop and mobile.
+
+(LLM written instructions underneath) 
+
 # JanitorAI Image Intake — real images to your own proxy
 
 Send **real images** (OpenAI-style multimodal `image_url` parts) through
