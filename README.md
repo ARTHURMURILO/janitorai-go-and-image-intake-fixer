@@ -116,7 +116,8 @@ default upstream), and the toggle off means everything goes direct again.
 > (`connect-src` violation, surfaced as a generic `NetworkError`) whenever
 > the bridge URL is not itself in that policy. The CSP-proof way to use
 > another API is the pattern below: point JanitorAI at the bridge and let
-> the bridge point at the API.
+> the bridge point at the API, or better, use a **route slot** (see Routes
+above): no in-page reroute exists to be blocked in the first place.
 
 ### Use any API, the CSP-proof way
 
@@ -135,6 +136,43 @@ fallback route: no key prefix matches provider keys, so any key lands there,
 `x-opencode-session` header switches off automatically for non-opencode
 bases, and image intake keeps working because the chat still passes through
 the bridge. Delete the line to revert.
+
+## Routes: one tunnel, every API (why paths exist)
+
+JanitorAI allows exactly one proxy origin per configuration (its
+Content-Security-Policy lists that origin and only that one), so rerouting
+requests inside the page can only ever go where the CSP allows. That is why
+the bridge answers with **path slots**: one tunnel URL, one path per API.
+You switch APIs by editing only the path in JanitorAI's proxy URL; the
+server never changes, no restart happens, and no in-page reroute is needed
+at all.
+
+| slot | proxy URL path | API | env override (default) |
+|---|---|---|---|
+| opencode (default for a bare `/v1`) | `/v1` | OpenCode GO | `UPSTREAM_URL` (`https://opencode.ai/zen/go/v1`) |
+| hemmingway | `/hemmingway/v1` (or `/hw/v1`) | Hemmingway | `HEMMINGWAY_URL` (`https://hemmingway.io/v1`) |
+| deepseek | `/deepseek/v1` (or `/ds/v1`) | DeepSeek | `DEEPSEEK_URL` (`https://api.deepseek.com/v1`) |
+| xiaomi | `/xiaomi/v1` (or `/mimo/v1`) | Xiaomi MiMo | `XIAOMI_URL` (`https://api.xiaomimimo.com/v1`) |
+| custom 1 | `/custom1/v1` (or `/c1/v1`) | any OpenAI compatible API | `CUSTOM1_URL` (slot absent until set) |
+| custom 2 | `/custom2/v1` (or `/c2/v1`) | any OpenAI compatible API | `CUSTOM2_URL` (slot absent until set) |
+
+Example: set JanitorAI's Proxy URL to `https://<your-tunnel>/xiaomi/v1` and
+paste your Xiaomi key in that same configuration. Appending
+`/chat/completions` works too; the slot understands the full path, and even
+a bare slot root maps to the completions endpoint.
+
+**Keys stay in JanitorAI.** The bridge stores no API keys: whichever
+`Authorization` header the active JanitorAI configuration sends is forwarded
+untouched to whichever slot the path selected. Endpoint selected there means
+that key is the right key, per config, nothing to copy anywhere.
+
+**Model names self-route as a fallback:** on a generic `/v1` URL,
+`deepseek-*`, `mimo-*` / `xiaomi-*` and `hemmingway-*` model names find
+their own slot automatically.
+
+**Custom slots:** add `export CUSTOM1_URL="https://any.openai.compat/v1"`
+to `start-zen-proxy.local.sh` and restart. Unset slots answer an honest 404
+instead of silently pretending to be someone else.
 
 ## How sending works
 
@@ -205,7 +243,10 @@ as its browser shows your key.
 |---|---|---|
 | `PORT` | `8081` (or `argv[1]`) | listen port |
 | `LOG_LEVEL` | `INFO` | logging verbosity |
-| `UPSTREAM_URL` / `HEMMINGWAY_URL` | built-in | override upstream bases; `UPSTREAM_URL` repoints the default route at any OpenAI compatible API (Xiaomi, etc.) |
+| `UPSTREAM_URL` / `HEMMINGWAY_URL` | built-in | override the opencode / hemmingway slot bases |
+| `DEEPSEEK_URL` | `https://api.deepseek.com/v1` | deepseek slot base |
+| `XIAOMI_URL` | `https://api.xiaomimimo.com/v1` | xiaomi slot base |
+| `CUSTOM1_URL` / `CUSTOM2_URL` | *(unset = no slot)* | any OpenAI compatible endpoint for `/custom1`, `/custom2` |
 | `PROXY_USER_AGENT` | `janitorai-bridge/2.5` | UA sent upstream (tagged, not spoofed) |
 | `SESSION_FILE` | `~/.config/zen-proxy/session` | persisted session id |
 | `IMAGE_INTAKE` | `1` | master switch |

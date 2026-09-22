@@ -288,5 +288,56 @@ check("QUOTA brings the store under the cap",
       sum(f.stat().st_size for f in _qdir.glob("0000000*.png")) <= 700,
       [f.name for f in _qdir.glob("0000000*.png")])
 
+# --- Route slots: one tunnel origin, one path per API (CSP-proof design) ----
+m.requests.request = _capturing_request
+
+def _post(path, payload=None, headers=None):
+    _fwd_seen.pop("url", None)
+    _fwd_seen.pop("headers", None)
+    return client.post(path, json=payload if payload is not None else _fwd_body,
+                       headers=headers or {})
+
+_post("/xiaomi/v1/chat/completions")
+check("ROUTE /xiaomi lands on the Xiaomi base",
+      str(_fwd_seen.get("url", "")).startswith("https://api.xiaomimimo.com/v1/chat/completions"),
+      _fwd_seen.get("url"))
+check("ROUTE xiaomi carries no opencode session header",
+      not any(k.lower() == "x-opencode-session" for k in (_fwd_seen.get("headers") or {})),
+      _fwd_seen.get("headers"))
+
+_post("/deepseek/v1/chat/completions")
+check("ROUTE /deepseek lands on the DeepSeek base",
+      str(_fwd_seen.get("url", "")).startswith("https://api.deepseek.com/v1/chat/completions"),
+      _fwd_seen.get("url"))
+
+client.get("/hemmingway/v1/models")
+check("ROUTE /hemmingway models list follows the slot",
+      str(_fwd_seen.get("url", "")).startswith("https://hemmingway.io/v1/models"),
+      _fwd_seen.get("url"))
+
+_post("/v1/chat/completions", {"model": "deepseek-chat", "messages": []})
+check("ROUTE deepseek model name self-routes on a generic /v1",
+      str(_fwd_seen.get("url", "")).startswith("https://api.deepseek.com/"),
+      _fwd_seen.get("url"))
+
+_post("/v1/chat/completions", {"model": "mimo-v2.6-pro", "messages": []})
+check("ROUTE mimo model name self-routes on a generic /v1",
+      str(_fwd_seen.get("url", "")).startswith("https://api.xiaomimimo.com/"),
+      _fwd_seen.get("url"))
+
+r = client.post("/custom1/v1/chat/completions", json=_fwd_body)
+check("ROUTE unset custom slot 404s (nothing configured behind it)",
+      r.status_code == 404, r.status_code)
+
+_post("/xiaomi")
+check("ROUTE bare slot root maps to chat completions",
+      str(_fwd_seen.get("url", "")).startswith("https://api.xiaomimimo.com/v1/chat/completions"),
+      _fwd_seen.get("url"))
+
+_post("/xiaomi/v1/chat/completions", headers={"Authorization": "Bearer xiaomi-key-abc"})
+check("KEY from JanitorAI travels to the slot untouched (nothing stored server side)",
+      (_fwd_seen.get("headers") or {}).get("Authorization") == "Bearer xiaomi-key-abc",
+      _fwd_seen.get("headers"))
+
 print("\nSECURITY_TESTS_" + ("OK" if not _fail else "FAILED: " + ", ".join(_fail)))
 raise SystemExit(1 if _fail else 0)

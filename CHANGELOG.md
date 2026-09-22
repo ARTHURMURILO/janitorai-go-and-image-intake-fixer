@@ -1,5 +1,19 @@
 # Changelog
 
+## Bridge 2.9
+- **Route slots: one tunnel, every API** (the CSP-proof multi API design).
+  JanitorAI allows one proxy origin per config, so the bridge answers with
+  paths instead: `/hemmingway`, `/deepseek`, `/xiaomi` (plus short forms)
+  join the original routing, and `/custom1` + `/custom2` appear when
+  `CUSTOM1_URL` / `CUSTOM2_URL` are set to any OpenAI compatible endpoint.
+  Switching APIs means editing only the path in JanitorAI's proxy URL.
+- **Keys are never stored server side**: the `Authorization` header of the
+  active JanitorAI configuration is forwarded untouched to whichever slot
+  the path selected.
+- **Model names self-route** on a generic `/v1`: `deepseek-*`, `mimo-*` /
+  `xiaomi-*`, `hemmingway-*`. A bare slot root POST maps to chat
+  completions. `UPSTREAM_URL` now simply overrides the opencode slot base.
+
 ## Bridge 2.8
 - **CSP-proof "any API" routing**: JanitorAI's Content-Security-Policy only
   allows its configured proxy origin, so the forward toggle's in-page

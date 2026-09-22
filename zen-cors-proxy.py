@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Flask, Response, request as flask_req
 
-VERSION = "2.8"
+VERSION = "2.9"
 PORT = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 8081))
 PROXY_UA = os.environ.get("PROXY_USER_AGENT", "janitorai-bridge/" + VERSION)
 SESSION_FILE = os.environ.get(
@@ -68,10 +68,23 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 #              cannot set the key (e.g. /hemmingway/v1/chat/completions).
 # `session_header` - whether to inject OpenCode's x-opencode-session.
 # ---------------------------------------------------------------------------
-# The default upstream (OpenCode slot) can be repointed at any OpenAI
-# compatible API with UPSTREAM_URL, e.g. https://api.xiaomimimo.com/v1.
-_OPencode_URL = os.environ.get("UPSTREAM_URL",
-                               "https://opencode.ai/zen/go/v1").rstrip("/")
+def _slot_base(env_name, default):
+    """Slot base URL: env wins; bare origins (no path) get /v1 appended so
+    any OpenAI compatible host can be dropped in as-is."""
+    v = os.environ.get(env_name, "").strip().rstrip("/") or default.strip().rstrip("/")
+    if not v:
+        return ""
+    p = urllib.parse.urlsplit(v)
+    if p.scheme and p.netloc and (not p.path or p.path == "/"):
+        v = v.rstrip("/") + "/v1"
+    return v
+
+
+# Route slots: ONE tunnel origin (the only one JanitorAI's CSP allows per
+# config) serving one path per API. Switch APIs in JanitorAI by editing only
+# the path in the proxy URL: /xiaomi/v1, /deepseek/v1, /hemmingway/v1,
+# /custom1/v1 ... No server restart, no in-page reroute, no CSP problem.
+_OPencode_URL = _slot_base("UPSTREAM_URL", "https://opencode.ai/zen/go/v1")
 
 UPSTREAMS = {
     "opencode": {
@@ -80,20 +93,57 @@ UPSTREAMS = {
         "ua_tag": f"{PROXY_UA} (OpenCode-Go-Compatible)",
         "key_prefix": None,
         "paths": ("/zen/go", "/zen"),
+        "model_prefixes": (),
         # Only OpenCode Zen wants x-opencode-session; an overridden base
         # (mimo, anything else) points at a different API that does not.
         "session_header": "opencode" in _OPencode_URL,
     },
     "hemmingway": {
-        "base": os.environ.get("HEMMINGWAY_URL",
-                               "https://hemmingway.io/v1").rstrip("/"),
+        "base": _slot_base("HEMMINGWAY_URL", "https://hemmingway.io/v1"),
         "label": "Hemmingway",
         "ua_tag": f"{PROXY_UA} (Hemmingway-Compatible)",
         "key_prefix": "hemmingway_live_",
         "paths": ("/hemmingway", "/hw"),
+        "model_prefixes": ("hemmingway",),
+        "session_header": False,
+    },
+    "deepseek": {
+        "base": _slot_base("DEEPSEEK_URL", "https://api.deepseek.com/v1"),
+        "label": "DeepSeek",
+        "ua_tag": f"{PROXY_UA} (DeepSeek-Compatible)",
+        "key_prefix": None,
+        "paths": ("/deepseek", "/ds"),
+        "model_prefixes": ("deepseek",),
+        "session_header": False,
+    },
+    "xiaomi": {
+        "base": _slot_base("XIAOMI_URL", "https://api.xiaomimimo.com/v1"),
+        "label": "Xiaomi MiMo",
+        "ua_tag": f"{PROXY_UA} (Xiaomi-MiMo-Compatible)",
+        "key_prefix": None,
+        "paths": ("/xiaomi", "/mimo"),
+        "model_prefixes": ("mimo", "xiaomi"),
         "session_header": False,
     },
 }
+
+# Two user configurable slots for any other OpenAI compatible endpoint.
+# They only exist when their URL is set; unset means the path 404s like any
+# unknown route, which is honest: there is nothing configured behind it.
+for _k, _env, _label, _short in (
+        ("custom1", "CUSTOM1_URL", "Custom 1", "/c1"),
+        ("custom2", "CUSTOM2_URL", "Custom 2", "/c2")):
+    _b = _slot_base(_env, "")
+    if _b:
+        UPSTREAMS[_k] = {
+            "base": _b,
+            "label": _label,
+            "ua_tag": PROXY_UA,
+            "key_prefix": None,
+            "paths": ("/" + _k, _short),
+            "model_prefixes": (),
+            "session_header": False,
+        }
 DEFAULT_PROVIDER = "opencode"
 
 logging.basicConfig(
@@ -889,11 +939,14 @@ def strip_api_prefix(full, method=None, body_bytes=None):
     '/models'              -> '/models'   (bare, misconfiguration tolerance)
     Returns None if the path isn't a recognised API path.
 
-    A POST straight at a bare base ('/v1') means the client was configured with
-    the completions endpoint AS the URL (JanitorAI's custom-proxy field works
-    that way) and posts to exactly that. Forwarding that to upstream's root
-    returns a 404 page, so map it to '/chat/completions' instead.
+    A POST straight at a bare slot root ('/xiaomi') or base ('/v1') means
+    the completions endpoint AS the URL (JanitorAI's custom-proxy field
+    works that way) and posts to exactly that. Forwarding that to an
+    upstream's root returns a 404 page, so map it to '/chat/completions'
+    instead.
     """
+    if full == "/" and method == "POST" and looks_like_chat_request(body_bytes):
+        return "/chat/completions"
     for prefix in ("/zen/go/v1", "/zen/v1", "/v1"):
         if full == prefix or full.startswith(prefix + "/"):
             rest = full[len(prefix):]
@@ -944,16 +997,19 @@ def resolve_route(path, auth_value, body_bytes, incoming_headers, method=None):
             if suffix is not None:
                 return key, suffix
 
-    # 4. Model name in the body (covers clients that send no usable key).
+    # 4. Model name in the body (covers clients that send a generic /v1 URL
+    #    but the model itself says which API it belongs to: deepseek-*,
+    #    mimo-*, hemmingway-* ...).
     if body_bytes:
         try:
             parsed = json.loads(body_bytes)
             if isinstance(parsed, dict):
                 model = str(parsed.get("model") or "").lower()
-                if model.startswith("hemmingway"):
-                    suffix = strip_api_prefix(full, method, body_bytes)
-                    if suffix is not None:
-                        return "hemmingway", suffix
+                for key, cfg in UPSTREAMS.items():
+                    if any(model.startswith(p) for p in cfg.get("model_prefixes", ())):
+                        suffix = strip_api_prefix(full, method, body_bytes)
+                        if suffix is not None:
+                            return key, suffix
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 
