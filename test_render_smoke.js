@@ -389,6 +389,22 @@ const anchors = (w) => [...w.document.querySelectorAll('[data-index] a[href]')]
        'signed observed key binds and stores the upload token');
   }
 
+  console.log('\n19) metadata block stays machine parseable (Tampermonkey)');
+  {
+    const head = SRC.slice(SRC.indexOf('==UserScript=='),
+                           SRC.indexOf('==/UserScript=='));
+    ok(/^\/\/\s*@connect\s+\*\s*$/m.test(head),
+       '@connect value is a bare * (comments must not share the line)');
+    ok(/^\/\/\s*@version\s+\d+\.\d+\.\d+\s*$/m.test(head),
+       '@version is a plain semver value');
+    const structKeys = /^(\/\/\s*@(grant|match|run-at|namespace|updateURL|downloadURL|license|author))\b/;
+    const polluted = head.split('\n').filter((l) =>
+      structKeys.test(l) && l.replace(/https?:\/\/\S+/g, '').includes('('));
+    ok(polluted.length === 0,
+       'no parenthetical comments inside structured metadata values' +
+       (polluted.length ? ': ' + polluted.join(' | ') : ''));
+  }
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('HARNESS ERROR', e); process.exit(2); });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI: Real Image Intake (bridge companion)
 // @namespace    https://github.com/ARTHURMURILO/janitorai-go-and-image-intake-fixer
-// @version      1.9.2
+// @version      1.9.3
 // @description  One-click image attach that uploads to YOUR server's image store (zen-bridge /img/upload), renders external image links in chat, and pairs with the bridge's real image intake. No JanitorAI Media Library needed.
 // @author       Arthur + Pi
 // @license      MIT
@@ -15,15 +15,18 @@
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_info
-// @connect      *   (deliberate: the bridge host is user-specific — ngrok,
-//                   cloudflared, a personal domain. Every remote call this
-//                   script makes is token-free except uploads, which go only
-//                   to the bridge host it learned by nonce-signed evidence.)
+// @connect      *
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
 
 /*
+ * WHY @connect IS A LONE `*`: the bridge host is user specific (ngrok,
+ * cloudflared, a personal domain) so it cannot be listed at install time.
+ * NEVER put a comment on a metadata line: Tampermonkey reads the whole rest
+ * of the line as the value, a polluted @connect matches nothing, and every
+ * GM request dies with "This domain is not a part of the @connect list".
+ *
  * HOW IT WORKS (pair with zen-cors-proxy.py >= 2.2):
  *   - The bridge converts `![alt](url)` and bare image URLs in outgoing
  *     messages into real base64 image parts for the model. That's the feature.
